@@ -44,14 +44,41 @@ def check_clip_manifest_consistency(data: dict[str, Any], clip_manifest_path: Pa
     except json.JSONDecodeError as exc:
         return [PreflightIssue("CLIP_MANIFEST_UNREADABLE", "blocking", f"{clip_manifest_path}: {exc}")]
 
-    manifest_by_shot: dict[str, dict[str, Any]] = {
-        clip["shot"]: clip for clip in manifest.get("clips", []) if "shot" in clip
-    }
+    clips = manifest.get("clips", [])
 
-    issues: list[PreflightIssue] = []
+    # Detect duplicate shot entries BEFORE building the lookup table below.
+    # A dict comprehension over clips[] would let the last entry for a
+    # given shot silently win, with no trace that an earlier - possibly
+    # authoritative - entry ever existed. Counting occurrences up front
+    # makes the ambiguity explicit instead of hiding it inside dict
+    # construction.
+    shot_counts: dict[str, int] = {}
+    for clip in clips:
+        if "shot" in clip:
+            shot_counts[clip["shot"]] = shot_counts.get(clip["shot"], 0) + 1
+    duplicate_shots = {shot for shot, count in shot_counts.items() if count > 1}
+
+    issues: list[PreflightIssue] = [
+        PreflightIssue(
+            "CLIP_MANIFEST_DUPLICATE_SHOT",
+            "blocking",
+            f"shot {shot!r} appears {shot_counts[shot]} times in {clip_manifest_path} "
+            "- which entry is authoritative is ambiguous",
+        )
+        for shot in sorted(duplicate_shots)
+    ]
+
+    manifest_by_shot: dict[str, dict[str, Any]] = {clip["shot"]: clip for clip in clips if "shot" in clip}
+
     for segment in data.get("segments", []):
         shot = segment.get("shot")
         ref = f"beat={segment.get('beat')} shot={shot}"
+
+        if shot in duplicate_shots:
+            # Already reported above. Comparing against whichever entry
+            # happened to win the dict build would only add a misleading
+            # match/mismatch verdict on top of an already-ambiguous manifest.
+            continue
 
         manifest_entry = manifest_by_shot.get(shot)
         if manifest_entry is None:
