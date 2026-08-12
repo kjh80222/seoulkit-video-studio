@@ -1,5 +1,17 @@
 from seoulkit_studio.render.concat import ConcatErrorKind, ConcatResult, concat_clips
+from seoulkit_studio.render.fonts import FONT_DIR, BundledFontError, resolve_bundled_font
 from seoulkit_studio.render.hold import HoldErrorKind, HoldResult, hold_clip
+from seoulkit_studio.render.overlay import (
+    OVERLAY_FONT_PRESETS,
+    OVERLAY_POSITION_PRESETS,
+    FontResolution,
+    FontSubstitutionIssue,
+    OverlayErrorKind,
+    OverlayResult,
+    build_overlay_filter,
+    burn_overlays,
+    resolve_font_file,
+)
 from seoulkit_studio.render.subtitle import (
     SUBTITLE_POSITION_PRESETS,
     BurnInErrorKind,
@@ -32,4 +44,16 @@ __all__ = [
     "generate_ass",
     "generate_srt",
     "probe_video_resolution",
+    "FONT_DIR",
+    "BundledFontError",
+    "resolve_bundled_font",
+    "OVERLAY_FONT_PRESETS",
+    "OVERLAY_POSITION_PRESETS",
+    "FontResolution",
+    "FontSubstitutionIssue",
+    "OverlayErrorKind",
+    "OverlayResult",
+    "build_overlay_filter",
+    "burn_overlays",
+    "resolve_font_file",
 ]
