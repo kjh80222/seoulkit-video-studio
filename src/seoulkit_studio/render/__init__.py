@@ -1,3 +1,12 @@
+from seoulkit_studio.render.audio_mix import (
+    DEFAULT_BGM_DUCKING_DB,
+    DEFAULT_DUCKING_ATTACK_MS,
+    DEFAULT_DUCKING_RELEASE_MS,
+    DEFAULT_TARGET_LUFS,
+    AudioMixErrorKind,
+    AudioMixResult,
+    mix_audio,
+)
 from seoulkit_studio.render.concat import ConcatErrorKind, ConcatResult, concat_clips
 from seoulkit_studio.render.fonts import FONT_DIR, BundledFontError, resolve_bundled_font
 from seoulkit_studio.render.hold import HoldErrorKind, HoldResult, hold_clip
@@ -25,6 +34,13 @@ from seoulkit_studio.render.time_format import ms_to_ass_timestamp, ms_to_ffmpeg
 from seoulkit_studio.render.trim import TrimErrorKind, TrimResult, trim_clip
 
 __all__ = [
+    "DEFAULT_BGM_DUCKING_DB",
+    "DEFAULT_DUCKING_ATTACK_MS",
+    "DEFAULT_DUCKING_RELEASE_MS",
+    "DEFAULT_TARGET_LUFS",
+    "AudioMixErrorKind",
+    "AudioMixResult",
+    "mix_audio",
     "ms_to_ffmpeg_timestamp",
     "ms_to_seconds_str",
     "ms_to_ass_timestamp",
