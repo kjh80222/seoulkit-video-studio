@@ -113,33 +113,26 @@ def test_load_plan_file_malformed_json(tmp_path):
 
 def test_compute_execution_result_error_on_load_error():
     load_error = LoadError("json_parse_error", "boom")
-    assert compute_execution_result(load_error, None) == "ERROR"
+    assert compute_execution_result(load_error, []) == "ERROR"
 
 
 def test_compute_execution_result_error_on_schema_violation():
-    preflight_result = PreflightResult(
-        preflight_result="FAIL", issues=[PreflightIssue("SCHEMA_VIOLATION", "blocking", "status: missing")]
-    )
-    assert compute_execution_result(None, preflight_result) == "ERROR"
+    issues = [PreflightIssue("SCHEMA_VIOLATION", "blocking", "status: missing")]
+    assert compute_execution_result(None, issues) == "ERROR"
 
 
 def test_compute_execution_result_blocked_on_other_blocking_issue():
-    preflight_result = PreflightResult(
-        preflight_result="FAIL", issues=[PreflightIssue("MISSING_CLIP", "blocking", "clips/shot_1a_flow.mp4 not found")]
-    )
-    assert compute_execution_result(None, preflight_result) == "BLOCKED"
+    issues = [PreflightIssue("MISSING_CLIP", "blocking", "clips/shot_1a_flow.mp4 not found")]
+    assert compute_execution_result(None, issues) == "BLOCKED"
 
 
 def test_compute_execution_result_pass_when_clean():
-    preflight_result = PreflightResult(preflight_result="PASS", issues=[])
-    assert compute_execution_result(None, preflight_result) == "PASS"
+    assert compute_execution_result(None, []) == "PASS"
 
 
 def test_compute_execution_result_pass_with_only_warnings():
-    preflight_result = PreflightResult(
-        preflight_result="PASS", issues=[PreflightIssue("USABLE_RANGE_MISSING", "warning", "...")]
-    )
-    assert compute_execution_result(None, preflight_result) == "PASS"
+    issues = [PreflightIssue("USABLE_RANGE_MISSING", "warning", "...")]
+    assert compute_execution_result(None, issues) == "PASS"
 
 
 # --- cross-check: Phase 1's severity_to_execution() and Phase 2's ---------
@@ -273,3 +266,108 @@ def test_evaluate_plan_effective_status_end_to_end(tmp_path):
     assert result.effective_status == "READY"
     assert result.load_error is None
     assert result.preflight_result.preflight_result == "PASS"
+
+
+# --- Phase 2.5: clip_manifest.json cross-validation integration ------------
+
+
+def _write_manifest(path: Path, clips: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"clips": clips}))
+
+
+def test_clip_manifest_mismatch_downgrades_a_phase1_pass_to_blocked(tmp_path):
+    # The stale-flag bug this Phase 2.5 refactor was meant to close: Phase
+    # 1 alone (edit_plan.json is internally consistent) would say PASS -
+    # only clip_manifest.json disagrees with edit_plan.json's copy of the
+    # usable range. If evaluate_plan() were still trusting a pre-computed
+    # PASS/FAIL flag instead of deriving it fresh from the merged issue
+    # list, this would incorrectly come back PASS.
+    plan = base_plan()
+    plan_path = tmp_path / "edit_plan.json"
+    plan_path.write_text(json.dumps(plan))
+    project_dir = make_project_dir(tmp_path, plan)
+
+    manifest_path = tmp_path / "clip_manifest.json"
+    segment = plan["segments"][0]
+    _write_manifest(
+        manifest_path,
+        [
+            {
+                "shot": segment["shot"],
+                "usable_start_ms": segment["usable_start_ms"],
+                "usable_end_ms": 999999,  # deliberately disagrees with edit_plan.json
+                "key_event_end_ms": segment["key_event_end_ms"],
+                "settle_start_ms": segment["settle_start_ms"],
+            }
+        ],
+    )
+
+    without_manifest = evaluate_plan(plan_path, project_dir)
+    with_manifest = evaluate_plan(plan_path, project_dir, clip_manifest_path=manifest_path)
+
+    assert without_manifest.studio_execution_result == "PASS"  # Phase 1 alone: clean
+    assert with_manifest.studio_execution_result == "BLOCKED"
+    assert with_manifest.effective_status == "NOT_READY"
+    assert any(issue.code == "CLIP_MANIFEST_MISMATCH" for issue in with_manifest.clip_manifest_issues)
+
+
+def test_clip_manifest_path_none_skips_the_check_entirely(tmp_path):
+    # Default behavior is unchanged from Phase 2: no clip_manifest_path,
+    # no clip_manifest issues, regardless of whether a manifest exists.
+    plan = base_plan()
+    plan_path = tmp_path / "edit_plan.json"
+    plan_path.write_text(json.dumps(plan))
+    project_dir = make_project_dir(tmp_path, plan)
+
+    result = evaluate_plan(plan_path, project_dir)
+
+    assert result.clip_manifest_issues == []
+    assert result.studio_execution_result == "PASS"
+
+
+def test_clip_manifest_check_is_skipped_when_structure_is_already_invalid(tmp_path):
+    plan = base_plan()
+    del plan["status"]  # 04-1 SCHEMA_VIOLATION
+    plan_path = tmp_path / "edit_plan.json"
+    plan_path.write_text(json.dumps(plan))
+    project_dir = make_project_dir(tmp_path, plan)
+    manifest_path = tmp_path / "clip_manifest.json"  # deliberately never created
+
+    result = evaluate_plan(plan_path, project_dir, clip_manifest_path=manifest_path)
+
+    assert result.studio_execution_result == "ERROR"
+    # If the clip_manifest check had run against this broken plan, it would
+    # have produced a CLIP_MANIFEST_MISSING warning. Its absence proves it
+    # was skipped, not just that it happened to find nothing.
+    assert result.clip_manifest_issues == []
+
+
+def test_evaluate_plan_never_modifies_edit_plan_or_clip_manifest(tmp_path):
+    plan = base_plan()
+    plan_path = tmp_path / "edit_plan.json"
+    plan_path.write_text(json.dumps(plan))
+    project_dir = make_project_dir(tmp_path, plan)
+
+    manifest_path = tmp_path / "clip_manifest.json"
+    segment = plan["segments"][0]
+    _write_manifest(
+        manifest_path,
+        [
+            {
+                "shot": segment["shot"],
+                "usable_start_ms": segment["usable_start_ms"],
+                "usable_end_ms": segment["usable_end_ms"],
+                "key_event_end_ms": segment["key_event_end_ms"],
+                "settle_start_ms": segment["settle_start_ms"],
+            }
+        ],
+    )
+
+    plan_before, manifest_before = _sha256(plan_path), _sha256(manifest_path)
+    result = evaluate_plan(plan_path, project_dir, clip_manifest_path=manifest_path)
+    plan_after, manifest_after = _sha256(plan_path), _sha256(manifest_path)
+
+    assert result.studio_execution_result == "PASS"
+    assert plan_after == plan_before
+    assert manifest_after == manifest_before
