@@ -142,6 +142,48 @@ def test_compute_execution_result_pass_with_only_warnings():
     assert compute_execution_result(None, preflight_result) == "PASS"
 
 
+# --- cross-check: Phase 1's severity_to_execution() and Phase 2's ---------
+# --- compute_effective_status() describe the same ch.18 ladder ------------
+
+
+@pytest.mark.parametrize(
+    "severity,execution_result,issues,expected",
+    [
+        ("blocking", "BLOCKED", [], "NOT_READY"),
+        ("blocking", "ERROR", [], "NOT_READY"),
+        ("warning", "PASS", [PreflightIssue("X", "warning", "...")], "REVIEW_REQUIRED"),
+    ],
+)
+def test_effective_status_matches_severity_to_execution_for_blocking_and_warning(
+    severity, execution_result, issues, expected
+):
+    # These are two independently-written mappings (Phase 1's
+    # severity_to_execution, driven by a single severity; Phase 2's
+    # compute_effective_status, driven by execution_result + issues) that
+    # are only supposed to agree because both implement ch.18's table by
+    # hand. Nothing enforces that today (see docs/phase-plan.md Known
+    # gaps) - this pins the agreement down so a future edit to either one
+    # that breaks the correspondence fails a test instead of silently
+    # drifting.
+    from seoulkit_studio.preflight import severity_to_execution
+
+    assert severity_to_execution(severity).effective_status == expected
+    assert compute_effective_status(execution_result, "READY", issues) == expected
+
+
+def test_effective_status_matches_severity_to_execution_for_the_clean_case():
+    # severity_to_execution(None) returns effective_status=None - ch.18's
+    # info row ("no forced status"). compute_effective_status's clean case
+    # instead returns the plan's own declared status, defaulting to READY
+    # when nothing was declared. Same meaning ("don't force a worse
+    # status"), different representation - so None and "READY" are the
+    # correct pair here, not a mismatch.
+    from seoulkit_studio.preflight import severity_to_execution
+
+    assert severity_to_execution(None).effective_status is None
+    assert compute_effective_status("PASS", "READY", []) == "READY"
+
+
 # --- compute_effective_status -----------------------------------------------
 
 
