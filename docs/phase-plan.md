@@ -11,7 +11,7 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 2.5 | `clip_manifest.json` cross-validation (spec ch. 24: "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies", "READ FOR VALIDATION ≠ RECALCULATE") | `edit_plan.json` usable-range fields that disagree with Stage 3's recorded values in `clip_manifest.json` are flagged as a blocking issue; neither file is ever modified by this check | ✅ Done |
 | 3 | Single-clip trim + FFmpeg execution | One clip trims to the exact expected boundaries | ✅ Done |
 | 4 | Concat | Multiple segments concatenate correctly | ✅ Done |
-| 5 | Hold handling (`source_hold` = no filter / `settle_frame_hold` = `tpad`) | Explicit test that `hold_ms` is never double-applied | Not started |
+| 5 | Hold handling (`source_hold` = no filter / `settle_frame_hold` = `tpad`) | Explicit test that `hold_ms` is never double-applied | ✅ Done |
 | 6 | ASS subtitle generation + burn-in | Subtitle position/style actually burns into the render | Not started |
 | 7 | Overlay rendering | Preset coordinates verified | Not started |
 | 8 | Audio mix (adopted/selected only, ducking, loudness) | Unresolved SFX/BGM forces the mix into REVIEW_REQUIRED | Not started |
@@ -19,14 +19,14 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | Not started |
 | 11 | CLI integration | End-to-end test | Not started |
 
-Phase 0 through Phase 4 are implemented (`src/seoulkit_studio/schema/`,
+Phase 0 through Phase 5 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
 including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
-including `render/time_format.py`, `render/trim.py`, and
-`render/concat.py`; 140/140 tests passing as of this update, with 10 of
+including `render/time_format.py`, `render/trim.py`, `render/concat.py`,
+and `render/hold.py`; 152/152 tests passing as of this update, with 14 of
 those requiring a system `ffmpeg`/`ffprobe` install and auto-skipping
-when absent). Phase 5 onward are not started and should not be assumed to
-work - do not reimplement Phase 0/1/2/2.5/3/4 in a new session; extend
+when absent). Phase 6 onward are not started and should not be assumed to
+work - do not reimplement Phase 0/1/2/2.5/3/4/5 in a new session; extend
 from here.
 
 Phase 3 introduces the project's first external system dependency:
@@ -39,6 +39,44 @@ fixture video is committed to the repo - `tests/conftest.py`'s
 go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
+
+- `render/hold.py::hold_clip()` cannot prevent being *called twice* on the
+  same clip - it is a stateless function with no memory of prior calls, so
+  "`hold_ms` is never double-applied" is not something this module can
+  enforce on its own. What it does do: reject `hold_ms < 1` immediately
+  with a `ValueError` rather than silently no-opping, so a caller mistake
+  that would invoke `hold_clip()` for a `none`/`source_hold` segment
+  (schema-guaranteed `hold_ms == 0`) fails loudly instead of quietly
+  producing a wrong render. Real double-application prevention - deciding
+  *whether* to call `hold_clip()` at all for a given segment - is the
+  responsibility of the same not-yet-built assembly layer already named in
+  the `concat_clips()` ordering-contract gap below (likely Phase 9-11).
+  `tests/test_hold.py::test_calling_hold_clip_twice_visibly_doubles_the_extension`
+  doesn't prove prevention; it proves *detection* - two real, unmocked
+  `hold_clip()` calls chained together measurably produce `2000 + 500 + 500`
+  instead of `2000 + 500`, giving that future assembly layer a concrete
+  real-measurement pattern to build its own regression test against, the
+  same way Phase 4's ordering test did for `concat_clips()`.
+
+- `preflight/validator.py` did not check the ch. 18
+  `hold.settle_frame_hold.max_ms` cap (default 1500ms, per-segment) until
+  Phase 5 planning surfaced this - a false assumption ("Phase 1 already
+  enforces this") was made out loud, checked against the actual code
+  (`grep hold preflight/validator.py` turned up nothing), and found to be
+  wrong. Fixed same session, before Phase 5 itself was implemented, same
+  reasoning as the Phase 2.5 duplicate-shot fix: an unenforced `hold_ms`
+  was a low-stakes gap while nothing consumed it, but Phase 5 was about to
+  start generating real frames from that exact unchecked value, raising an
+  unbounded `hold_ms` from "a validation gap" to "a render that silently
+  takes as long / as much disk as whatever number happens to be in
+  `edit_plan.json`." `check_time_consistency()` now takes a
+  `max_settle_frame_hold_ms` parameter (default
+  `DEFAULT_MAX_SETTLE_FRAME_HOLD_MS = 1500`) and emits
+  `MAX_HOLD_MS_EXCEEDED` (blocking) for any `settle_frame_hold` segment
+  over it. `tests/test_preflight.py`'s
+  `test_hold_ms_exceeding_default_max_is_blocking`,
+  `test_hold_ms_within_default_max_is_allowed`, and
+  `test_max_hold_ms_is_configurable_per_call` cover it.
 
 - `render/concat.py::concat_clips()` does not sort `clip_paths` - it joins
   them in exactly the order given. Determining beat/shot ascending order
