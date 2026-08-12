@@ -48,6 +48,15 @@ def test_source_hold_with_nonzero_hold_ms_is_rejected_by_schema():
     assert any(issue.code == "SCHEMA_VIOLATION" for issue in result.issues)
 
 
+def test_settle_frame_hold_with_zero_hold_ms_is_rejected_by_schema():
+    # hold_strategy == settle_frame_hold must have hold_ms >= 1 (Stage 5 spec, ch. 03) -
+    # the other direction of the same allOf constraint tested above. Without this,
+    # a segment could claim a freeze-frame hold that actually holds for 0ms.
+    result = validate_edit_plan(load_fixture("invalid_settle_frame_hold_zero_hold_ms.json"))
+    assert not result.passed
+    assert any(issue.code == "SCHEMA_VIOLATION" for issue in result.issues)
+
+
 def test_duration_invariant_tolerance_boundary():
     plan = load_fixture("valid_minimal.json")
     segment = plan["segments"][0]
