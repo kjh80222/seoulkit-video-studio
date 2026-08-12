@@ -8,7 +8,7 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 0 | `edit_plan.json` schema validator + Duration Invariant validator | Valid/invalid samples + invariant-violation samples all pass their expected result | ✅ Done |
 | 1 | Pre-flight validator (file existence, time consistency, severity mapping) | issue → severity → effective_status conversion matches ch. 04-5 exactly | ✅ Done |
 | 2 | PLAN STATUS / STUDIO EXECUTION RESULT separation | Original `edit_plan.json` file is provably unmodified even when it's malformed | ✅ Done |
-| 2.5 | `clip_manifest.json` cross-validation (spec ch. 24: "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies", "READ FOR VALIDATION ≠ RECALCULATE") | `edit_plan.json` usable-range fields that disagree with Stage 3's recorded values in `clip_manifest.json` are flagged as a blocking issue; neither file is ever modified by this check | Not started |
+| 2.5 | `clip_manifest.json` cross-validation (spec ch. 24: "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies", "READ FOR VALIDATION ≠ RECALCULATE") | `edit_plan.json` usable-range fields that disagree with Stage 3's recorded values in `clip_manifest.json` are flagged as a blocking issue; neither file is ever modified by this check | ✅ Done |
 | 3 | Single-clip trim + FFmpeg execution | One clip trims to the exact expected boundaries | Not started |
 | 4 | Concat | Multiple segments concatenate correctly | Not started |
 | 5 | Hold handling (`source_hold` = no filter / `settle_frame_hold` = `tpad`) | Explicit test that `hold_ms` is never double-applied | Not started |
@@ -19,11 +19,11 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | Not started |
 | 11 | CLI integration | End-to-end test | Not started |
 
-Phase 0, Phase 1, and Phase 2 are implemented (`src/seoulkit_studio/schema/`,
-`src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`; 44/44
-tests passing as of this update). Phase 2.5 onward are not started and
-should not be assumed to work - do not reimplement Phase 0/1/2 in a new
-session; extend from here.
+Phase 0 through Phase 2.5 are implemented (`src/seoulkit_studio/schema/`,
+`src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
+including `execution/clip_manifest.py`; 60/60 tests passing as of this
+update). Phase 3 onward are not started and should not be assumed to work -
+do not reimplement Phase 0/1/2/2.5 in a new session; extend from here.
 
 ## Known gaps
 
@@ -36,33 +36,29 @@ session; extend from here.
   (Phase 1's severity mapping already references this config block by
   hardcoded value, and Phase 8's ducking/loudness defaults will need it too).
 
-- `clip_manifest.json` cross-validation is not implemented - **now formally
-  scheduled as Phase 2.5** (see table above), between PLAN STATUS/STUDIO
-  EXECUTION RESULT separation and clip trim. Phase 1's
-  `check_time_consistency` only checks that `edit_plan.json` is internally
-  consistent (clip bounds inside its own recorded usable range); it never
-  opens `clip_manifest.json` to compare against Stage 3's actual observed
-  values, so a Stage 4 mistake that writes a self-consistent but wrong
-  usable range currently passes Pre-flight undetected. This must land
-  before Phase 3 starts trusting `clip_in_ms`/`clip_out_ms` for real
-  FFmpeg calls.
+- ~~`clip_manifest.json` cross-validation~~ **Resolved in Phase 2.5.**
+  `src/seoulkit_studio/execution/clip_manifest.py` now compares
+  `usable_start_ms`/`usable_end_ms`/`key_event_end_ms`/`settle_start_ms`
+  between `edit_plan.json` and `clip_manifest.json` per shot. The stale-flag
+  risk noted here previously was resolved by changing
+  `compute_execution_result()` to take a raw `list[PreflightIssue]` instead
+  of trusting a pre-computed `PreflightResult.preflight_result` flag
+  (option (b) from the design discussion) - PASS/FAIL is now always derived
+  fresh from whatever issues are passed in, so a second independent issue
+  source (clip_manifest cross-validation) can be merged in without any
+  stale-state risk. `tests/test_execution.py::test_clip_manifest_mismatch_downgrades_a_phase1_pass_to_blocked`
+  is the regression test proving this: a plan that Phase 1 alone would call
+  PASS correctly comes back BLOCKED once a clip_manifest mismatch is added.
 
-  **Integration note for Phase 2.5**: `compute_effective_status()` already
-  accepts a generic `list[PreflightIssue]`, so a new
-  `CLIP_MANIFEST_MISMATCH` blocking issue can flow into it without a
-  signature change. `compute_execution_result()`, however, trusts
-  `PreflightResult.preflight_result` (the PASS/FAIL flag Phase 1's
-  `run_preflight` already computed) as-is - if Phase 2.5's clip_manifest
-  check finds a blocking issue *after* Phase 1 already returned PASS,
-  something has to recompute that flag over the merged issue list before
-  `compute_execution_result` is called, or it will keep reading the stale
-  PASS and never reach BLOCKED. Phase 2.5 needs to either (a) merge
-  clip_manifest issues into a fresh `PreflightResult` with `preflight_result`
-  recomputed from the combined issues, or (b) change
-  `compute_execution_result` to take a raw `list[PreflightIssue]` instead of
-  a `PreflightResult`, deriving PASS/FAIL from the list itself instead of
-  trusting a pre-computed flag. Not decided yet - flagging so Phase 2.5's
-  plan addresses it explicitly instead of discovering it mid-implementation.
+- `check_clip_manifest_consistency()` matches `clip_manifest.json` clips to
+  `edit_plan.json` segments by `shot` using a dict comprehension
+  (`{clip["shot"]: clip for clip in manifest["clips"]}`) - if
+  `clip_manifest.json` ever contained two entries with the same `shot`
+  (which Stage 3 shouldn't produce, but nothing currently stops it), the
+  later one silently wins and the duplicate goes unreported. Not urgent -
+  no phase currently depends on catching this - but worth a
+  `CLIP_MANIFEST_DUPLICATE_SHOT` warning if it ever turns out Stage 3's
+  actual output needs that guard.
 
 - `compute_effective_status()` (Phase 2) returns only the `PlanStatus`
   string (`READY`/`REVIEW_REQUIRED`/`NOT_READY`) - there is no function that
