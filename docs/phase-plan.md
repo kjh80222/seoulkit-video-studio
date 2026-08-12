@@ -20,3 +20,13 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 
 Only Phase 0 is implemented so far. Later phases are not started and should
 not be assumed to work.
+
+## Known gaps
+
+- Config loading is not implemented. `duration_tolerance_ms` (spec ch. 18)
+  is a hardcoded Python default (`DEFAULT_DURATION_TOLERANCE_MS = 50` in
+  `src/seoulkit_studio/schema/validator.py`), overridable per call but not
+  read from any file. Loading the full ch. 18 config block (render,
+  subtitle, overlay, audio, preflight, naming settings) as YAML is not
+  assigned to any phase yet and should be picked up before it's needed
+  (Phase 1's severity mapping is the first thing that references it).
