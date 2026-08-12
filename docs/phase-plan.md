@@ -21,7 +21,7 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 
 Phase 0 through Phase 2.5 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
-including `execution/clip_manifest.py`; 60/60 tests passing as of this
+including `execution/clip_manifest.py`; 62/62 tests passing as of this
 update). Phase 3 onward are not started and should not be assumed to work -
 do not reimplement Phase 0/1/2/2.5 in a new session; extend from here.
 
@@ -50,15 +50,22 @@ do not reimplement Phase 0/1/2/2.5 in a new session; extend from here.
   is the regression test proving this: a plan that Phase 1 alone would call
   PASS correctly comes back BLOCKED once a clip_manifest mismatch is added.
 
-- `check_clip_manifest_consistency()` matches `clip_manifest.json` clips to
-  `edit_plan.json` segments by `shot` using a dict comprehension
-  (`{clip["shot"]: clip for clip in manifest["clips"]}`) - if
-  `clip_manifest.json` ever contained two entries with the same `shot`
-  (which Stage 3 shouldn't produce, but nothing currently stops it), the
-  later one silently wins and the duplicate goes unreported. Not urgent -
-  no phase currently depends on catching this - but worth a
-  `CLIP_MANIFEST_DUPLICATE_SHOT` warning if it ever turns out Stage 3's
-  actual output needs that guard.
+- ~~`check_clip_manifest_consistency()` silently let a duplicate `shot` in
+  `clip_manifest.json` resolve via last-wins~~ **Fixed, same session as
+  Phase 2.5.** The risk wasn't the duplicate itself - it was that the
+  wrong (or the right, by chance) entry would be picked with zero trace,
+  meaning a genuinely mismatched `edit_plan.json` could pass Pre-flight
+  undetected purely because a later manifest entry happened to agree with
+  it. Occurrence counting now runs as its own pass over `clips[]` *before*
+  the lookup dict is built, so a duplicate is reported
+  (`CLIP_MANIFEST_DUPLICATE_SHOT`, blocking) regardless of which entry a
+  naive dict build would have picked -
+  `tests/test_clip_manifest.py::test_duplicate_shot_in_manifest_is_blocking`
+  specifically constructs the "duplicate happens to match" case and
+  confirms it's still reported. Once a shot is flagged, no further
+  `CLIP_MANIFEST_MISMATCH`/`SHOT_MISSING` check runs for it, to avoid
+  layering a second, possibly-misleading verdict on an already-ambiguous
+  entry.
 
 - `compute_effective_status()` (Phase 2) returns only the `PlanStatus`
   string (`READY`/`REVIEW_REQUIRED`/`NOT_READY`) - there is no function that
