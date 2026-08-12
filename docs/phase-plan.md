@@ -40,6 +40,25 @@ go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
 
+- Clarified, not fixed (nothing was wrong): when `render/hold.py::hold_clip()`'s
+  `hold_ms < 1` guard was temporarily removed to red/green-test it,
+  `hold_ms=-100` still raised `ValueError` while `hold_ms=0` did not. The
+  reflex explanation - "the Phase 0 schema's `hold_ms: {minimum: 0}`
+  constraint already caught the negative case" - is wrong: `hold_clip()` is
+  a standalone primitive that never checks whether its caller went through
+  schema validation (the test that exposed this calls it directly, as does
+  everything else today), so schema validation gives it exactly zero
+  protection. What actually caught it was `ms_to_seconds_str()`'s own
+  `ms < 0` guard (written for an unrelated reason - an FFmpeg timestamp
+  can't be negative), which `hold_clip()` happens to call downstream. That's
+  an incidental side effect, not a designed second line of defense, and it
+  doesn't cover `hold_ms=0` at all - a future refactor of
+  `ms_to_seconds_str()` could silently remove it without anyone noticing.
+  The comment directly above `hold_clip()`'s `if hold_ms < 1` line now says
+  this explicitly, so the one guard that actually matters (and already
+  covers the full invalid range) doesn't get mistaken for a backup to
+  something else.
+
 - `render/hold.py::hold_clip()` cannot prevent being *called twice* on the
   same clip - it is a stateless function with no memory of prior calls, so
   "`hold_ms` is never double-applied" is not something this module can
