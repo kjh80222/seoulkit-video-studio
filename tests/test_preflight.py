@@ -197,6 +197,82 @@ def test_schema_invalid_plan_short_circuits_before_file_or_time_checks(tmp_path)
     assert not any(issue.code in ("MISSING_CLIP", "MISSING_VOICE_ASSET") for issue in result.issues)
 
 
+def make_settle_frame_hold_plan(hold_ms: int) -> dict:
+    """A single-segment plan whose Duration Invariant holds for *any*
+    hold_ms (segment_duration_ms is derived from it), so these tests only
+    ever exercise MAX_HOLD_MS_EXCEEDED - never an incidental
+    DURATION_INVARIANT_VIOLATION from an unrelated arithmetic mismatch."""
+    plan = base_plan()
+    segment = {
+        "beat": 1,
+        "shot": "1A",
+        "start_ms": 0,
+        "end_ms": 3500 + hold_ms,
+        "timing_grade": "EXACT",
+        "source_clip": "clips/shot_1a_flow.mp4",
+        "source_duration_ms": 6000,
+        "usable_start_ms": 0,
+        "usable_end_ms": 5800,
+        "key_event_end_ms": 3500,
+        "settle_start_ms": 3500,
+        "clip_in_ms": 0,
+        "clip_out_ms": 3500,
+        "camera_behavior": "locked-off",
+        "hold_strategy": "settle_frame_hold",
+        "hold_ms": hold_ms,
+        "trim_reason": "settle frame hold test",
+        "voice_text": "Test.",
+        "status": "OK",
+        "status_note": None,
+    }
+    plan["segments"] = [segment]
+    plan["voice"]["total_duration_ms"] = segment["end_ms"]
+    return plan
+
+
+def test_hold_ms_within_default_max_is_allowed(tmp_path):
+    plan = make_settle_frame_hold_plan(hold_ms=1500)  # exactly the default max
+    project_dir = make_project_dir(tmp_path, plan)
+
+    result = run_preflight(plan, project_dir)
+
+    assert result.preflight_result == "PASS"
+    assert not any(issue.code == "MAX_HOLD_MS_EXCEEDED" for issue in result.issues)
+
+
+def test_hold_ms_exceeding_default_max_is_blocking(tmp_path):
+    plan = make_settle_frame_hold_plan(hold_ms=2000)  # exceeds default max (1500)
+    project_dir = make_project_dir(tmp_path, plan)
+
+    result = run_preflight(plan, project_dir)
+
+    assert result.preflight_result == "FAIL"
+    assert any(
+        issue.code == "MAX_HOLD_MS_EXCEEDED" and issue.severity == "blocking" for issue in result.issues
+    )
+
+
+def test_max_hold_ms_is_configurable_per_call(tmp_path):
+    plan = make_settle_frame_hold_plan(hold_ms=1500)  # under the default, but not under a stricter override
+    project_dir = make_project_dir(tmp_path, plan)
+
+    result = run_preflight(plan, project_dir, max_settle_frame_hold_ms=1000)
+
+    assert result.preflight_result == "FAIL"
+    assert any(issue.code == "MAX_HOLD_MS_EXCEEDED" for issue in result.issues)
+
+
+def test_max_hold_ms_check_ignores_non_settle_frame_hold_segments(tmp_path):
+    # hold_strategy="none" always has hold_ms=0 (schema-enforced) - proves the
+    # check only ever fires for settle_frame_hold, even with a limit of 0.
+    plan = base_plan()
+    project_dir = make_project_dir(tmp_path, plan)
+
+    result = run_preflight(plan, project_dir, max_settle_frame_hold_ms=0)
+
+    assert not any(issue.code == "MAX_HOLD_MS_EXCEEDED" for issue in result.issues)
+
+
 @pytest.mark.parametrize("severity", ["blocking", "warning", "info"])
 def test_severity_to_execution_matches_ch18_table(severity):
     permission = severity_to_execution(severity)
