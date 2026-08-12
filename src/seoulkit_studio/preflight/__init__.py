@@ -1,4 +1,5 @@
 from seoulkit_studio.preflight.validator import (
+    DEFAULT_MAX_SETTLE_FRAME_HOLD_MS,
     SEVERITY_MAPPING,
     ExecutionPermission,
     PreflightIssue,
@@ -12,6 +13,7 @@ from seoulkit_studio.preflight.validator import (
 )
 
 __all__ = [
+    "DEFAULT_MAX_SETTLE_FRAME_HOLD_MS",
     "SEVERITY_MAPPING",
     "ExecutionPermission",
     "PreflightIssue",
