@@ -25,3 +25,14 @@ def ms_to_ffmpeg_timestamp(ms: int) -> str:
     minutes, remainder = divmod(remainder, 60_000)
     seconds, milliseconds = divmod(remainder, 1_000)
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+
+def ms_to_seconds_str(ms: int) -> str:
+    """For FFmpeg options that take plain decimal seconds (e.g. `tpad`'s
+    `stop_duration`), not the `HH:MM:SS.mmm` timestamp format above. Same
+    integer-`divmod`-only construction, same reason: zero rounding error."""
+    if ms < 0:
+        raise ValueError(f"ms must be non-negative, got {ms}")
+
+    seconds, milliseconds = divmod(ms, 1_000)
+    return f"{seconds}.{milliseconds:03d}"
