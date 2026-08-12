@@ -36,3 +36,27 @@ def ms_to_seconds_str(ms: int) -> str:
 
     seconds, milliseconds = divmod(ms, 1_000)
     return f"{seconds}.{milliseconds:03d}"
+
+
+def ms_to_ass_timestamp(ms: int) -> str:
+    """ASS subtitle format's `H:MM:SS.CC` (centiseconds, ch. 11) - unlike its
+    two siblings above, this one does NOT have zero rounding error, because
+    ASS itself cannot represent anything finer than 10ms. Rounding to the
+    nearest centisecond is unavoidable here, not a shortcut.
+
+    The rounding happens once, on the *total* millisecond value, before any
+    field is split out - never per-field (hours/minutes/seconds rounded
+    independently). Rounding a field at a time risks a carry bug (e.g.
+    59.996s naively rounding its own centisecond field without bumping the
+    minute); rounding the total first and then decomposing the rounded total
+    cannot produce that class of bug, by construction. Worst-case error is
+    +-5ms, well inside `duration_tolerance_ms` (default 50ms, ch. 18).
+    """
+    if ms < 0:
+        raise ValueError(f"ms must be non-negative, got {ms}")
+
+    total_centiseconds = (ms + 5) // 10
+    hours, remainder = divmod(total_centiseconds, 360_000)
+    minutes, remainder = divmod(remainder, 6_000)
+    seconds, centiseconds = divmod(remainder, 100)
+    return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
