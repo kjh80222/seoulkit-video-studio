@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "project": "fixture-invalid-source-hold-nonzero-hold-ms",
+  "format": "MINI",
+  "status": "READY",
+  "timing_grade_default": "EXACT",
+  "voice": {
+    "audio_file": "clips/audio/voice_final.wav",
+    "aligned": true,
+    "alignment_file": "clips/audio/voice_alignment.json",
+    "total_duration_ms": 4300
+  },
+  "segments": [
+    {
+      "beat": 1,
+      "shot": "1A",
+      "start_ms": 0,
+      "end_ms": 4300,
+      "timing_grade": "EXACT",
+      "source_clip": "clips/shot_1a_flow.mp4",
+      "source_duration_ms": 6000,
+      "usable_start_ms": 0,
+      "usable_end_ms": 5800,
+      "key_event_end_ms": 4200,
+      "settle_start_ms": 4800,
+      "clip_in_ms": 0,
+      "clip_out_ms": 4000,
+      "camera_behavior": "locked-off",
+      "hold_strategy": "source_hold",
+      "hold_ms": 300,
+      "trim_reason": "attempted to double-count hold on top of the extended clip_out_ms - this is the schema-level guard the spec calls for",
+      "voice_text": "In 1953, Seoul was mostly rubble.",
+      "status": "OK",
+      "status_note": null
+    }
+  ],
+  "overlays": [],
+  "subtitles": [],
+  "audio_layers": {
+    "voice": "authoritative",
+    "sfx_source": { "mode": "none", "clips": [] },
+    "bgm": { "mode": "none", "file": null, "reference_db": null }
+  },
+  "warnings": []
+}

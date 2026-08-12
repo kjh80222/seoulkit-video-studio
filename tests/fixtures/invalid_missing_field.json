@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "project": "fixture-invalid-missing-field",
+  "format": "MINI",
+  "timing_grade_default": "EXACT",
+  "voice": {
+    "audio_file": "clips/audio/voice_final.wav",
+    "aligned": true,
+    "total_duration_ms": 4800
+  },
+  "segments": [
+    {
+      "beat": 1,
+      "shot": "1A",
+      "start_ms": 0,
+      "end_ms": 4800,
+      "timing_grade": "EXACT",
+      "source_clip": "clips/shot_1a_flow.mp4",
+      "clip_in_ms": 0,
+      "clip_out_ms": 4800,
+      "camera_behavior": "movement",
+      "hold_strategy": "none",
+      "hold_ms": 0,
+      "voice_text": "In 1953, Seoul was mostly rubble.",
+      "status": "OK"
+    }
+  ],
+  "audio_layers": {
+    "voice": "authoritative",
+    "sfx_source": { "mode": "none", "clips": [] },
+    "bgm": { "mode": "none", "file": null }
+  }
+}

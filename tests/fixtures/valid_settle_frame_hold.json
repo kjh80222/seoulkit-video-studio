@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "project": "fixture-valid-settle-frame-hold",
+  "format": "MINI",
+  "status": "REVIEW_REQUIRED",
+  "timing_grade_default": "AUDIO_BASED",
+  "voice": {
+    "audio_file": "clips/audio/voice_final.wav",
+    "aligned": false,
+    "alignment_file": null,
+    "total_duration_ms": 4500
+  },
+  "segments": [
+    {
+      "beat": 1,
+      "shot": "1A",
+      "start_ms": 0,
+      "end_ms": 4500,
+      "timing_grade": "AUDIO_BASED",
+      "source_clip": "clips/shot_1a_flow.mp4",
+      "source_duration_ms": 4200,
+      "usable_start_ms": 0,
+      "usable_end_ms": 4000,
+      "key_event_end_ms": 3000,
+      "settle_start_ms": 3600,
+      "clip_in_ms": 0,
+      "clip_out_ms": 4000,
+      "camera_behavior": "locked-off",
+      "hold_strategy": "settle_frame_hold",
+      "hold_ms": 500,
+      "trim_reason": "voice narration ran longer than the clip's usable range; froze the last stable frame",
+      "voice_text": "The tariff was $116 per ship.",
+      "status": "REVIEW_REQUIRED",
+      "status_note": "settle_frame_hold applied, within Stage 5 max_ms threshold"
+    }
+  ],
+  "overlays": [],
+  "subtitles": [],
+  "audio_layers": {
+    "voice": "authoritative",
+    "sfx_source": { "mode": "none", "clips": [] },
+    "bgm": { "mode": "none", "file": null, "reference_db": null }
+  },
+  "warnings": [
+    {
+      "code": "TIMING_GRADE_NOT_EXACT",
+      "message": "segment beat=1 shot=1A is AUDIO_BASED, Final Render blocked",
+      "severity": "warning",
+      "segment_ref": "beat=1 shot=1A"
+    }
+  ]
+}

@@ -1,0 +1,212 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://seoulkit.local/schemas/edit_plan.v1.json",
+  "title": "SEOULKIT MINI edit_plan.json",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project",
+    "format",
+    "status",
+    "timing_grade_default",
+    "voice",
+    "segments",
+    "audio_layers"
+  ],
+  "properties": {
+    "schema_version": { "type": "string", "const": "1.0" },
+    "project": { "type": "string" },
+    "format": { "type": "string", "enum": ["MINI"] },
+    "status": { "type": "string", "enum": ["READY", "REVIEW_REQUIRED", "NOT_READY"] },
+    "timing_grade_default": { "type": "string", "enum": ["EXACT", "AUDIO_BASED", "ESTIMATED"] },
+
+    "voice": {
+      "type": "object",
+      "required": ["audio_file", "aligned", "total_duration_ms"],
+      "properties": {
+        "audio_file": { "type": ["string", "null"] },
+        "aligned": { "type": "boolean" },
+        "alignment_file": { "type": ["string", "null"] },
+        "total_duration_ms": { "type": "integer", "minimum": 0 }
+      }
+    },
+
+    "segments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "beat", "shot", "start_ms", "end_ms", "timing_grade",
+          "source_clip", "clip_in_ms", "clip_out_ms",
+          "camera_behavior", "hold_strategy", "hold_ms",
+          "voice_text", "status"
+        ],
+        "properties": {
+          "beat": { "type": "integer", "minimum": 1 },
+          "shot": { "type": "string", "pattern": "^[0-9]+[A-Z]$" },
+          "start_ms": { "type": "integer", "minimum": 0 },
+          "end_ms": { "type": "integer", "minimum": 0 },
+          "timing_grade": { "type": "string", "enum": ["EXACT", "AUDIO_BASED", "ESTIMATED"] },
+
+          "source_clip": { "type": "string" },
+          "source_duration_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "usable_start_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "usable_end_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "key_event_end_ms": { "type": ["integer", "null"], "minimum": 0 },
+          "settle_start_ms": { "type": ["integer", "null"], "minimum": 0 },
+
+          "clip_in_ms": { "type": "integer", "minimum": 0 },
+          "clip_out_ms": { "type": "integer", "minimum": 0 },
+
+          "camera_behavior": { "type": "string", "enum": ["movement", "locked-off"] },
+
+          "hold_strategy": {
+            "type": "string",
+            "enum": ["none", "source_hold", "settle_frame_hold"]
+          },
+          "hold_ms": { "type": "integer", "minimum": 0 },
+
+          "trim_reason": { "type": ["string", "null"] },
+          "voice_text": { "type": "string" },
+
+          "status": { "type": "string", "enum": ["OK", "REVIEW_REQUIRED", "NOT_READY"] },
+          "status_note": { "type": ["string", "null"] }
+        },
+        "allOf": [
+          {
+            "$comment": "hold_ms semantics are locked. source_hold/none MUST have hold_ms=0: the extra usable-range time is already fully reflected in clip_in_ms/clip_out_ms. settle_frame_hold MUST have hold_ms>0: it is additional freeze-frame duration Stage 5 generates beyond clip_out_ms.",
+            "if": { "properties": { "hold_strategy": { "enum": ["none", "source_hold"] } } },
+            "then": { "properties": { "hold_ms": { "const": 0 } } }
+          },
+          {
+            "if": { "properties": { "hold_strategy": { "const": "settle_frame_hold" } } },
+            "then": { "properties": { "hold_ms": { "type": "integer", "minimum": 1 } } }
+          }
+        ]
+      }
+    },
+
+    "overlays": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["beat", "text", "type", "start_ms", "end_ms", "position_preset", "source"],
+        "properties": {
+          "beat": { "type": "integer" },
+          "shot": { "type": ["string", "null"] },
+          "text": { "type": "string" },
+          "type": { "type": "string", "enum": ["giant_number", "label", "headline"] },
+          "start_ms": { "type": "integer", "minimum": 0 },
+          "end_ms": { "type": "integer", "minimum": 0 },
+          "position_preset": {
+            "type": "string",
+            "enum": [
+              "top-left", "top-right", "top-center",
+              "bottom-left", "bottom-right",
+              "center-lower-third", "center-upper-third"
+            ]
+          },
+          "position_override": {
+            "type": ["object", "null"],
+            "properties": {
+              "x_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+              "y_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+              "reason": { "type": "string" }
+            }
+          },
+          "source": { "type": "string", "const": "stage1_beat_table" }
+        }
+      }
+    },
+
+    "subtitles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["beat", "start_ms", "end_ms", "lines", "position_preset", "timing_grade"],
+        "properties": {
+          "beat": { "type": "integer" },
+          "start_ms": { "type": "integer", "minimum": 0 },
+          "end_ms": { "type": "integer", "minimum": 0 },
+          "lines": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1,
+            "maxItems": 2
+          },
+          "position_preset": { "type": "string", "enum": ["bottom-center", "top-center"] },
+          "position_override_reason": { "type": ["string", "null"] },
+          "timing_grade": { "type": "string", "enum": ["EXACT", "AUDIO_BASED", "ESTIMATED"] }
+        }
+      }
+    },
+
+    "audio_layers": {
+      "type": "object",
+      "required": ["voice", "sfx_source", "bgm"],
+      "properties": {
+        "voice": { "type": "string", "const": "authoritative" },
+
+        "sfx_source": {
+          "type": "object",
+          "properties": {
+            "mode": { "type": "string", "enum": ["stage3_optional", "none"] },
+            "clips": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["shot", "file", "action"],
+                "properties": {
+                  "shot": { "type": "string" },
+                  "file": { "type": "string" },
+                  "action": {
+                    "type": "string",
+                    "enum": ["adopted", "discarded"],
+                    "$comment": "'candidate' is intentionally NOT a valid final value. Every SFX clip must already be resolved to adopted or discarded before edit_plan.json reaches Stage 5."
+                  }
+                }
+              }
+            }
+          }
+        },
+
+        "bgm": {
+          "type": "object",
+          "required": ["mode"],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["selected", "none"],
+              "$comment": "'producer_choice' removed as a final-state value. By the time edit_plan.json is READY, BGM must already be resolved to selected (with a file) or none."
+            },
+            "file": { "type": ["string", "null"] },
+            "reference_db": { "type": ["number", "null"] }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "mode": { "const": "selected" } } },
+              "then": {
+                "required": ["file"],
+                "properties": { "file": { "type": "string" } }
+              }
+            }
+          ]
+        }
+      }
+    },
+
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message", "severity"],
+        "properties": {
+          "code": { "type": "string" },
+          "message": { "type": "string" },
+          "severity": { "type": "string", "enum": ["info", "warning", "blocking"] },
+          "segment_ref": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

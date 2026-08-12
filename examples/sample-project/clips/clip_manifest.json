@@ -1,0 +1,25 @@
+{
+  "note": "EXAMPLE - OWNER: Stage 3 QC, written at G4 pass time. Stage 4 and Stage 5 are READ-ONLY consumers of this file (Stage 5 spec ch. 02, ch. 24).",
+  "clips": [
+    {
+      "shot": "1A",
+      "file": "clips/shot_1a_flow.mp4",
+      "camera_behavior": "movement",
+      "source_duration_ms": 6000,
+      "usable_start_ms": 0,
+      "usable_end_ms": 5800,
+      "key_event_end_ms": 4200,
+      "settle_start_ms": 4800
+    },
+    {
+      "shot": "1B",
+      "file": "clips/shot_1b_flow.mp4",
+      "camera_behavior": "locked-off",
+      "source_duration_ms": 6000,
+      "usable_start_ms": 0,
+      "usable_end_ms": 5600,
+      "key_event_end_ms": 3800,
+      "settle_start_ms": 4400
+    }
+  ]
+}

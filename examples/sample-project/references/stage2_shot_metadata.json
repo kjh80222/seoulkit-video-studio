@@ -1,0 +1,18 @@
+{
+  "note": "EXAMPLE - Stage 2 shot metadata. Story Function + Continuity are required Stage 3/4 inputs (Stage 1/3/4 manuals); scene/style prose lives in the Stage 2 prompt output itself, not duplicated here.",
+  "style_anchor": "shot_1a_flow (approved anchor - see references/style_anchor.* placeholder)",
+  "shots": [
+    {
+      "shot": "1A",
+      "beat": 1,
+      "story_function": "Wide establishing shot: shows the scale of postwar destruction across the whole street before the detail shot brings it to eye level.",
+      "continuity": "Overcast midday light as the dominant source, cool grey tone; postwar rubble and cratered dirt road established here carry forward into 1B."
+    },
+    {
+      "shot": "1B",
+      "beat": 1,
+      "story_function": "Detail shot: makes the human cost of the destruction legible at eye level, immediately after 1A established the scale.",
+      "continuity": "Matches the dust/rubble condition and overcast lighting direction established in 1A."
+    }
+  ]
+}

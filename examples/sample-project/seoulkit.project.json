@@ -1,0 +1,6 @@
+{
+  "project": "sample-project",
+  "format": "MINI",
+  "schema_version": "1.0",
+  "note": "EXAMPLE PROJECT - scaffold only, demonstrates the Stage 5 spec ch.02 folder layout end to end. Not a real production."
+}

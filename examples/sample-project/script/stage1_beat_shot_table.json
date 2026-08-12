@@ -1,0 +1,25 @@
+{
+  "note": "EXAMPLE - machine-readable Beat/Shot table, field names per Stage 1 manual sec. 17-1",
+  "beats": [
+    {
+      "beat": 1,
+      "visual_purpose": "Establish scale of destruction",
+      "screen_number": "1953",
+      "screen_label": null
+    }
+  ],
+  "shots": [
+    {
+      "shot": "1A",
+      "beat": 1,
+      "shot_type": "wide",
+      "on_screen_text": "1953"
+    },
+    {
+      "shot": "1B",
+      "beat": 1,
+      "shot_type": "detail",
+      "on_screen_text": null
+    }
+  ]
+}
