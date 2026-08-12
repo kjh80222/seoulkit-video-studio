@@ -100,3 +100,34 @@ def sample_frame_rgb():
         return (sum(r) / len(r), sum(g) / len(g), sum(b) / len(b))
 
     return _sample
+
+
+@pytest.fixture
+def frame_region_stddev():
+    """Grab one real decoded frame at `at_ms`, crop it, and return the
+    standard deviation of luminance within that crop. On a flat-color
+    background (see make_solid_color_video), stddev stays near 0 unless
+    something with real edges - like burned-in subtitle text - was drawn
+    there. This is how the burn-in tests verify "something was actually
+    drawn in roughly the right place at roughly the right time" without
+    doing OCR."""
+
+    def _stddev(path: Path, at_ms: int, crop: str = "iw:ih/2:0:ih/2") -> float:
+        ts = f"{at_ms / 1000:.3f}"
+        proc = subprocess.run(
+            [
+                "ffmpeg", "-y", "-ss", ts, "-i", str(path),
+                "-frames:v", "1", "-vf", f"crop={crop}",
+                "-f", "rawvideo", "-pix_fmt", "gray",
+                "-",
+            ],
+            capture_output=True, check=True,
+        )
+        raw = proc.stdout
+        if not raw:
+            return 0.0
+        mean = sum(raw) / len(raw)
+        variance = sum((b - mean) ** 2 for b in raw) / len(raw)
+        return variance ** 0.5
+
+    return _stddev
