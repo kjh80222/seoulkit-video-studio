@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.pytest_cache/
+build/
+dist/
+
+# Rendered/generated media and logs — never checked into git (Stage 5 spec ch. 02)
+examples/**/clips/*.mp4
+examples/**/clips/audio/*.wav
+examples/**/clips/audio/*.json
+!examples/**/clips/audio/README.md
+examples/**/clips/audio/sfx/*.wav
+examples/**/clips/audio/bgm/*.mp3
+examples/**/preview/*.mp4
+examples/**/output/*.mp4
+examples/**/output/*.ass
+examples/**/output/*.srt
+examples/**/output/*.render_report.json
+examples/**/logs/*.log
