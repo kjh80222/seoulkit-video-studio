@@ -1,3 +1,4 @@
+import hashlib
 import shutil
 import subprocess
 
@@ -118,3 +119,23 @@ def test_ffmpeg_failure_on_missing_source_is_captured_not_raised(tmp_path):
     assert result.returncode != 0
     assert result.stderr != ""
     assert not output.exists()
+
+
+@requires_ffmpeg
+def test_trim_never_modifies_the_source_clip(tmp_path, make_synthetic_video):
+    # `-an` on the *trimmed output* is not a threat to the source clip: `-y`
+    # only ever forces overwrite of the output position, never of a path
+    # passed to `-i`. But this project has never accepted "we don't call
+    # write()" as proof on its own (Phase 2/2.5 both required a SHA-256
+    # comparison) - so this asserts it the same way, on the one file in this
+    # pipeline (clips/shot_*.mp4) that is Stage 3's authoritative,
+    # read-only-for-Stage-5 output (ch. 02).
+    source = make_synthetic_video(tmp_path / "source.mp4", duration_ms=3000, with_audio=True)
+    source_hash_before = hashlib.sha256(source.read_bytes()).hexdigest()
+
+    output = tmp_path / "trimmed.mp4"
+    result = trim_clip(source, output, clip_in_ms=0, clip_out_ms=2000)
+
+    assert result.ok, result.stderr
+    source_hash_after = hashlib.sha256(source.read_bytes()).hexdigest()
+    assert source_hash_after == source_hash_before
