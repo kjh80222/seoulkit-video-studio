@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "project": "fixture-invalid-settle-frame-hold-zero-hold-ms",
+  "format": "MINI",
+  "status": "REVIEW_REQUIRED",
+  "timing_grade_default": "AUDIO_BASED",
+  "voice": {
+    "audio_file": "clips/audio/voice_final.wav",
+    "aligned": false,
+    "alignment_file": null,
+    "total_duration_ms": 4000
+  },
+  "segments": [
+    {
+      "beat": 1,
+      "shot": "1A",
+      "start_ms": 0,
+      "end_ms": 4000,
+      "timing_grade": "AUDIO_BASED",
+      "source_clip": "clips/shot_1a_flow.mp4",
+      "source_duration_ms": 4200,
+      "usable_start_ms": 0,
+      "usable_end_ms": 4000,
+      "key_event_end_ms": 3000,
+      "settle_start_ms": 3600,
+      "clip_in_ms": 0,
+      "clip_out_ms": 4000,
+      "camera_behavior": "locked-off",
+      "hold_strategy": "settle_frame_hold",
+      "hold_ms": 0,
+      "trim_reason": "attempted settle_frame_hold with no actual hold time - this is the schema-level guard the spec calls for (hold_ms semantics are locked: settle_frame_hold MUST have hold_ms>0)",
+      "voice_text": "The tariff was $116 per ship.",
+      "status": "OK",
+      "status_note": null
+    }
+  ],
+  "overlays": [],
+  "subtitles": [],
+  "audio_layers": {
+    "voice": "authoritative",
+    "sfx_source": { "mode": "none", "clips": [] },
+    "bgm": { "mode": "none", "file": null, "reference_db": null }
+  },
+  "warnings": []
+}
