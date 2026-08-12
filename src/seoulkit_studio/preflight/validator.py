@@ -29,6 +29,30 @@ ordering):
   schema (sfx action enum excludes "candidate"; bgm allOf requires `file`
   when mode="selected") - see the comment on `check_time_consistency`
   below for why this isn't reimplemented here.
+- 04-4b declared warnings (added Phase 8): the schema's top-level
+  `warnings[]` is (`code`/`message`/`severity`/`segment_ref`) - the same
+  shape as `PreflightIssue` (`message` vs. `detail` naming aside). ch. 12
+  needs a way to represent "an SFX candidate Stage 4 hasn't decided on
+  yet" - the schema *cannot* represent that inside `sfx_source.clips[]`
+  itself (the `action` enum excludes anything but `adopted`/`discarded`),
+  so the only schema-legal way to express "still unresolved" is to leave
+  that shot out of the array entirely and record it as a `warnings[]`
+  entry instead. `check_declared_warnings()` doesn't know or care what a
+  given warning *means* - matching ch. 12's "Stage 5 does not judge SFX/
+  BGM aesthetics, it only executes what's already been decided" - it just
+  folds every entry Stage 4 already declared into the same issue list
+  everything else here produces, generically. This makes it a general
+  escape hatch for anything the schema can't validate structurally, not
+  an SFX/BGM-specific check; "unresolved SFX/BGM" is simply the concrete
+  case ch. 12 calls out as the motivating example.
+
+  **This relies on a convention, not an enforced contract**: nothing
+  requires Stage 4 to actually add a `warnings[]` entry for an SFX
+  candidate it leaves undecided - it's schema-legal to just omit the shot
+  from `sfx_source.clips[]` and leave `warnings[]` empty, and Pre-flight
+  has no way to detect that silently-dropped case (there's no metadata
+  saying "there were supposed to be N SFX candidates and this plan only
+  resolved M of them"). See `docs/phase-plan.md` Known gaps.
 
 `hold_ms` field validity (hold_strategy-vs-zero) is a Phase 0 schema `allOf`
 constraint, but the ch. 18 `hold.settle_frame_hold.max_ms` cap (default
@@ -255,6 +279,18 @@ def check_time_consistency(
     return issues
 
 
+def check_declared_warnings(data: dict[str, Any]) -> list[PreflightIssue]:
+    return [
+        PreflightIssue(
+            warning.get("code", "DECLARED_WARNING"),
+            warning.get("severity", "warning"),
+            warning.get("message", ""),
+            warning.get("segment_ref"),
+        )
+        for warning in data.get("warnings", [])
+    ]
+
+
 def run_preflight(
     data: dict[str, Any],
     project_dir: Path,
@@ -265,8 +301,12 @@ def run_preflight(
     if structure_issues:
         return PreflightResult(preflight_result="FAIL", issues=structure_issues)
 
-    issues = check_file_existence(data, project_dir) + check_time_consistency(
-        data, tolerance_ms=duration_tolerance_ms, max_settle_frame_hold_ms=max_settle_frame_hold_ms
+    issues = (
+        check_file_existence(data, project_dir)
+        + check_time_consistency(
+            data, tolerance_ms=duration_tolerance_ms, max_settle_frame_hold_ms=max_settle_frame_hold_ms
+        )
+        + check_declared_warnings(data)
     )
     has_blocking = any(issue.severity == "blocking" for issue in issues)
     return PreflightResult(preflight_result="FAIL" if has_blocking else "PASS", issues=issues)
