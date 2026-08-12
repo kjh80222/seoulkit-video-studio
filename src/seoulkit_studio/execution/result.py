@@ -18,8 +18,19 @@ draws exactly this line - a SCHEMA_VIOLATION issue (04-1, `check_structure`)
 means the plan couldn't be trusted enough to even attempt 04-2~04-4, and
 returns early. Reusing that boundary: a LoadError (file missing/unreadable,
 JSON parse failure) or a SCHEMA_VIOLATION issue -> ERROR. Any other
-blocking issue (04-2~04-4: missing files, bad timing, Duration Invariant)
--> BLOCKED.
+blocking issue (04-2~04-4, or Phase 2.5's clip_manifest.json
+cross-validation) -> BLOCKED.
+
+Phase 2.5 design note: `compute_execution_result` takes a raw
+`list[PreflightIssue]` rather than a `PreflightResult` object, on purpose.
+An earlier version trusted `PreflightResult.preflight_result` (a PASS/FAIL
+flag Phase 1 pre-computed) - but once Phase 2.5 needed to merge in a
+second, independent source of blocking issues (clip_manifest.json
+cross-validation), that pre-computed flag would go stale the moment new
+issues were merged in after the fact, with nothing forcing a recompute.
+Deriving PASS/FAIL fresh from whatever issue list is passed in removes the
+redundant state entirely instead of relying on every caller to keep it in
+sync by hand.
 """
 
 from __future__ import annotations
@@ -27,7 +38,7 @@ from __future__ import annotations
 from typing import Literal
 
 from seoulkit_studio.execution.plan_loader import LoadError
-from seoulkit_studio.preflight import PreflightIssue, PreflightResult
+from seoulkit_studio.preflight import PreflightIssue
 
 StudioExecutionResult = Literal["PASS", "BLOCKED", "ERROR"]
 PlanStatus = Literal["READY", "REVIEW_REQUIRED", "NOT_READY"]
@@ -35,17 +46,13 @@ PlanStatus = Literal["READY", "REVIEW_REQUIRED", "NOT_READY"]
 _STATUS_RANK: dict[PlanStatus, int] = {"READY": 0, "REVIEW_REQUIRED": 1, "NOT_READY": 2}
 
 
-def compute_execution_result(
-    load_error: LoadError | None, preflight_result: PreflightResult | None
-) -> StudioExecutionResult:
+def compute_execution_result(load_error: LoadError | None, issues: list[PreflightIssue]) -> StudioExecutionResult:
     if load_error is not None:
         return "ERROR"
 
-    assert preflight_result is not None, "a plan that loaded successfully must have been preflighted"
-
-    if any(issue.code == "SCHEMA_VIOLATION" for issue in preflight_result.issues):
+    if any(issue.code == "SCHEMA_VIOLATION" for issue in issues):
         return "ERROR"
-    if preflight_result.preflight_result == "FAIL":
+    if any(issue.severity == "blocking" for issue in issues):
         return "BLOCKED"
     return "PASS"
 
