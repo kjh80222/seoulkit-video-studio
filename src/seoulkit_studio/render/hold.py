@@ -61,6 +61,23 @@ class HoldResult:
 
 
 def hold_clip(clip_path: Path, output_path: Path, hold_ms: int) -> HoldResult:
+    # This is the *only* guard that is actually part of hold_clip()'s own
+    # contract, and it covers the full invalid range (0 and every negative
+    # value) unconditionally, regardless of how the caller got hold_ms.
+    #
+    # It is NOT backed up by the Phase 0 schema's `"hold_ms": {"minimum": 0}`
+    # constraint - that constraint only ever applies to data that has
+    # actually gone through `validate_schema()` first. hold_clip() is a
+    # standalone primitive with no idea whether that happened (tests call
+    # it directly, as does anything else that isn't the not-yet-built
+    # Phase 9-11 assembly layer), so schema validation provides this
+    # function exactly zero protection.
+    #
+    # `ms_to_seconds_str()` below happens to also reject negative values,
+    # but only for its own reason (an FFmpeg timestamp can't be negative) -
+    # that's an incidental side effect of hold_clip() calling it, not a
+    # designed second line of defense, and it doesn't cover hold_ms=0 at
+    # all. Don't rely on it; this line is what actually matters.
     if hold_ms < 1:
         raise ValueError(
             f"hold_ms must be >= 1, got {hold_ms} - hold_clip() should only be called for a "
