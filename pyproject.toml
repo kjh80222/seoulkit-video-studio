@@ -9,6 +9,7 @@ description = "SEOULKIT MINI Video Studio - deterministic edit_plan.json render 
 requires-python = ">=3.11"
 dependencies = [
     "jsonschema>=4.20",
+    "fonttools>=4.50",
 ]
 
 [project.optional-dependencies]
@@ -21,6 +22,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "seoulkit_studio.schema" = ["*.json"]
+"seoulkit_studio.assets.fonts" = ["*.ttf", "OFL.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
