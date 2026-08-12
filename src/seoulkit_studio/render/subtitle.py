@@ -1,7 +1,7 @@
 """ASS subtitle generation + burn-in (Stage 5 spec, ch. 11, ch. 18).
 
 ch. 11: iterate `edit_plan.json`'s `subtitles[]`, generate one ASS Dialogue
-event per entry, map `position_preset` to an `\\an` alignment tag + margin
+event per entry, map `position_preset` to an `\an` alignment tag + margin
 (ch. 18: `bottom-center -> {an: 2, margin_v: 120}`,
 `top-center -> {an: 8, margin_v: 100}`), use one project-wide style (ch. 18:
 Noto Sans KR, 44pt, outline 3, shadow 1). "Preview/Final 모두 burn-in을
@@ -31,6 +31,21 @@ subtitles are burned in (ch. 09's resolution-dependent step looks like
 final encoding, step 7, which comes *after* subtitle burn-in, step 5) -
 that mismatch is a known gap (`docs/phase-plan.md`), not something this
 module tries to solve.
+
+Font resolution: `_FONT_NAME` names the style's `Fontname`, but libass (the
+engine behind FFmpeg's `ass` filter) still has to find an actual "Noto Sans
+KR" file to satisfy that name. Relying on system fontconfig for that was
+never actually verified as safe - it happened to produce legible Korean
+subtitles in this project's dev sandbox only because a different, unasked-
+for CJK font (WenQuanYi Zen Hei) was coincidentally installed and libass's
+own per-glyph fallback picked it up; a "Noto Sans KR" file was never
+actually present. `burn_subtitles()` now passes `fontsdir=` (an option the
+`ass` filter supports) pointing at `render.fonts.FONT_DIR`, where the real
+bundled "Noto Sans KR" files are committed as ordinary binary assets - see
+`render/fonts.py`. libass still does its own
+family-name matching within that directory, but the directory now actually
+contains the requested family instead of leaving the outcome up to whatever
+else is installed.
 """
 
 from __future__ import annotations
@@ -41,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from seoulkit_studio.render.fonts import BundledFontError, FONT_DIR, resolve_bundled_font
 from seoulkit_studio.render.time_format import ms_to_ass_timestamp, ms_to_ffmpeg_timestamp
 
 # ch. 18 `subtitle.position_presets`.
@@ -121,7 +137,7 @@ def probe_video_resolution(video_path: Path) -> tuple[int, int]:
     return int(width_str), int(height_str)
 
 
-BurnInErrorKind = Literal["ffmpeg_not_found", "ffmpeg_failed"]
+BurnInErrorKind = Literal["ffmpeg_not_found", "ffmpeg_failed", "bundled_font_error"]
 
 
 @dataclass
@@ -151,6 +167,23 @@ def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path) -> BurnI
         raise ValueError(
             f"ass_path must not contain ':' (FFmpeg filtergraph syntax would misparse it), got {ass_path!r}"
         )
+    if ":" in str(FONT_DIR):
+        raise ValueError(
+            f"bundled font directory must not contain ':' (FFmpeg filtergraph syntax would misparse it), "
+            f"got {FONT_DIR!r}"
+        )
+
+    try:
+        resolve_bundled_font("regular")
+    except BundledFontError as exc:
+        return BurnInResult(
+            output_path=output_path,
+            command=[],
+            returncode=None,
+            stdout="",
+            stderr=str(exc),
+            error="bundled_font_error",
+        )
 
     ffmpeg_bin = shutil.which("ffmpeg")
     if ffmpeg_bin is None:
@@ -167,7 +200,7 @@ def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path) -> BurnI
         ffmpeg_bin,
         "-y",
         "-i", str(video_path),
-        "-vf", f"ass={ass_path}",
+        "-vf", f"ass={ass_path}:fontsdir={FONT_DIR}",
         "-an",
         "-c:v", "libx264",
         str(output_path),
