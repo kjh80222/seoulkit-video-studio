@@ -7,7 +7,7 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 |---|---|---|---|
 | 0 | `edit_plan.json` schema validator + Duration Invariant validator | Valid/invalid samples + invariant-violation samples all pass their expected result | ✅ Done |
 | 1 | Pre-flight validator (file existence, time consistency, severity mapping) | issue → severity → effective_status conversion matches ch. 04-5 exactly | ✅ Done |
-| 2 | PLAN STATUS / STUDIO EXECUTION RESULT separation | Original `edit_plan.json` file is provably unmodified even when it's malformed | Not started |
+| 2 | PLAN STATUS / STUDIO EXECUTION RESULT separation | Original `edit_plan.json` file is provably unmodified even when it's malformed | ✅ Done |
 | 2.5 | `clip_manifest.json` cross-validation (spec ch. 24: "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies", "READ FOR VALIDATION ≠ RECALCULATE") | `edit_plan.json` usable-range fields that disagree with Stage 3's recorded values in `clip_manifest.json` are flagged as a blocking issue; neither file is ever modified by this check | Not started |
 | 3 | Single-clip trim + FFmpeg execution | One clip trims to the exact expected boundaries | Not started |
 | 4 | Concat | Multiple segments concatenate correctly | Not started |
@@ -19,10 +19,11 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | Not started |
 | 11 | CLI integration | End-to-end test | Not started |
 
-Phase 0 and Phase 1 are implemented (`src/seoulkit_studio/schema/`,
-`src/seoulkit_studio/preflight/`; 22/22 tests passing as of this update).
-Phase 2 onward are not started and should not be assumed to work - do not
-reimplement Phase 0/1 in a new session; extend from here.
+Phase 0, Phase 1, and Phase 2 are implemented (`src/seoulkit_studio/schema/`,
+`src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`; 44/44
+tests passing as of this update). Phase 2.5 onward are not started and
+should not be assumed to work - do not reimplement Phase 0/1/2 in a new
+session; extend from here.
 
 ## Known gaps
 
@@ -45,6 +46,39 @@ reimplement Phase 0/1 in a new session; extend from here.
   usable range currently passes Pre-flight undetected. This must land
   before Phase 3 starts trusting `clip_in_ms`/`clip_out_ms` for real
   FFmpeg calls.
+
+  **Integration note for Phase 2.5**: `compute_effective_status()` already
+  accepts a generic `list[PreflightIssue]`, so a new
+  `CLIP_MANIFEST_MISMATCH` blocking issue can flow into it without a
+  signature change. `compute_execution_result()`, however, trusts
+  `PreflightResult.preflight_result` (the PASS/FAIL flag Phase 1's
+  `run_preflight` already computed) as-is - if Phase 2.5's clip_manifest
+  check finds a blocking issue *after* Phase 1 already returned PASS,
+  something has to recompute that flag over the merged issue list before
+  `compute_execution_result` is called, or it will keep reading the stale
+  PASS and never reach BLOCKED. Phase 2.5 needs to either (a) merge
+  clip_manifest issues into a fresh `PreflightResult` with `preflight_result`
+  recomputed from the combined issues, or (b) change
+  `compute_execution_result` to take a raw `list[PreflightIssue]` instead of
+  a `PreflightResult`, deriving PASS/FAIL from the list itself instead of
+  trusting a pre-computed flag. Not decided yet - flagging so Phase 2.5's
+  plan addresses it explicitly instead of discovering it mid-implementation.
+
+- `compute_effective_status()` (Phase 2) returns only the `PlanStatus`
+  string (`READY`/`REVIEW_REQUIRED`/`NOT_READY`) - there is no function that
+  takes that *final*, blended status and returns Preview/Final `bool`s the
+  way Phase 1's `severity_to_execution()` does for a raw severity.
+  `tests/test_execution.py` now proves the two mappings agree row-for-row
+  (`NOT_READY` ↔ `blocking`, `REVIEW_REQUIRED` ↔ `warning`, `READY` ↔
+  `info`/none - the last pair via `None` vs. `"READY"`, same meaning,
+  different representation), so a future edit to either one that breaks
+  the correspondence will fail a test instead of silently drifting. Still
+  true, though: no code converts a `compute_effective_status()` result
+  into an actual Preview/Final gate today. Not urgent for Phase 2.5, but
+  Phase 9 (Preview/Final split, hard gate) will need exactly this - add a
+  small `effective_status -> ExecutionPermission` mapping there, or reuse
+  `severity_to_execution` if by then it turns out to be the same function
+  in disguise.
 
 - The `info` severity tier (ch. 18 `severity_mapping`) is fully wired
   (`SEVERITY_MAPPING`, `severity_to_execution`, tests) but no Pre-flight
