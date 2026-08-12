@@ -22,8 +22,8 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 Phase 0 through Phase 3 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
 including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
-including `render/time_format.py` and `render/trim.py`; 131/131 tests
-passing as of this update, with 4 of those requiring a system `ffmpeg`/
+including `render/time_format.py` and `render/trim.py`; 132/132 tests
+passing as of this update, with 5 of those requiring a system `ffmpeg`/
 `ffprobe` install and auto-skipping when absent). Phase 4 onward are not
 started and should not be assumed to work - do not reimplement Phase
 0/1/2/2.5/3 in a new session; extend from here.
@@ -64,6 +64,22 @@ go through this session's GitHub-web-UI text-paste upload workflow.
   trimmed output has none, specifically so a later regression (e.g.
   someone removing `-an` while wiring up Concat) fails loudly instead of
   quietly leaking an unused audio stream through the pipeline.
+
+  This decision was made without prior plan approval (unlike every other
+  Phase 3 choice), so it was revisited and confirmed after the fact:
+  `clips/*.mp4` is Stage 3's authoritative, read-only-for-Stage-5 output
+  (ch. 02) - if a future phase ever did need the source clip's original
+  audio, it's still sitting untouched on disk, because `-an` only ever
+  affects the *trimmed output* `trim_clip()` writes, never the source it
+  reads from. `tests/test_trim.py::test_trim_never_modifies_the_source_clip`
+  proves this the same way Phase 2/2.5 proved their own immutability
+  guarantees - SHA-256 hash of the source file, before vs. after. Trying
+  to fake a failure here (swapping the command's final argument from
+  `output_path` to `source_path`, simulating an input/output mixup) didn't
+  even get as far as a hash mismatch: FFmpeg itself refused with "cannot
+  edit existing files in-place" and the trim failed outright, which the
+  test still caught via `result.ok`. So there are two independent guards
+  against this bug class today, not one.
 
 - Config loading is not implemented. `duration_tolerance_ms` (spec ch. 18)
   is a hardcoded Python default (`DEFAULT_DURATION_TOLERANCE_MS = 50` in
