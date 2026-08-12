@@ -12,22 +12,31 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 3 | Single-clip trim + FFmpeg execution | One clip trims to the exact expected boundaries | ✅ Done |
 | 4 | Concat | Multiple segments concatenate correctly | ✅ Done |
 | 5 | Hold handling (`source_hold` = no filter / `settle_frame_hold` = `tpad`) | Explicit test that `hold_ms` is never double-applied | ✅ Done |
-| 6 | ASS subtitle generation + burn-in | Subtitle position/style actually burns into the render | Not started |
+| 6 | ASS subtitle generation + burn-in | Subtitle position/style actually burns into the render | ✅ Done (automated tests + one manual visual QC pass, see Known gaps) |
 | 7 | Overlay rendering | Preset coordinates verified | Not started |
 | 8 | Audio mix (adopted/selected only, ducking, loudness) | Unresolved SFX/BGM forces the mix into REVIEW_REQUIRED | Not started |
 | 9 | Preview/Final split, hard gate | Final is refused while REVIEW_REQUIRED | Not started |
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | Not started |
 | 11 | CLI integration | End-to-end test | Not started |
 
-Phase 0 through Phase 5 are implemented (`src/seoulkit_studio/schema/`,
+Phase 0 through Phase 6 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
 including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
 including `render/time_format.py`, `render/trim.py`, `render/concat.py`,
-and `render/hold.py`; 152/152 tests passing as of this update, with 14 of
-those requiring a system `ffmpeg`/`ffprobe` install and auto-skipping
-when absent). Phase 6 onward are not started and should not be assumed to
-work - do not reimplement Phase 0/1/2/2.5/3/4/5 in a new session; extend
-from here.
+`render/hold.py`, and `render/subtitle.py`; 234/234 tests passing as of
+this update, with 23 of those requiring a system `ffmpeg`/`ffprobe`
+install and auto-skipping when absent). Phase 7 onward are not started
+and should not be assumed to work - do not reimplement Phase
+0/1/2/2.5/3/4/5/6 in a new session; extend from here.
+
+Phase 6 is the first phase whose "done" criterion cannot be fully proven
+by an automated test suite - subtitle position/timing/burn-in success are
+automated (see Known gaps for how), but whether the rendered text is
+actually legible, correctly styled, and inside the safe zone needs a human
+to look at a real render at least once. That manual pass is treated as
+part of this phase's completion, not optional polish - the sample render
+produced from `examples/sample-project`'s own `edit_plan.json` was sent
+alongside this update for exactly that check.
 
 Phase 3 introduces the project's first external system dependency:
 `ffmpeg`/`ffprobe` must be installed to run the full test suite (not just
@@ -39,6 +48,47 @@ fixture video is committed to the repo - `tests/conftest.py`'s
 go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
+
+- **Severity: real and OS-dependent, not a rare edge case.**
+  `render/subtitle.py::burn_subtitles()` rejects a colon in `ass_path` with
+  a `ValueError` before ever invoking FFmpeg (FFmpeg's own filtergraph
+  parser treats `:` as an option separator inside a `-vf` value, and an
+  unescaped one produces a genuinely misleading error - confirmed by
+  actually feeding FFmpeg a colon path during Phase 6 development: it
+  fails with `"Unable to parse option value ... as image size"` /
+  `"Error applying option 'original_size' to filter 'ass'"`, neither of
+  which mentions the real cause). The guard makes the *symptom* clear, but
+  does not make the underlying limitation go away: **on Windows, an
+  absolute path is `C:\...` by construction, so this isn't an occasional
+  edge case there - it's the default shape of every absolute path.**
+  `burn_subtitles()` today will refuse to run at all against a
+  Windows-style absolute `ass_path`. Proper filtergraph escaping (or
+  writing the `.ass` file somewhere guaranteed colon-free and passing a
+  relative/short path instead) is unimplemented and should be picked up
+  before this pipeline is ever expected to run on Windows.
+
+- `render/subtitle.py::generate_ass()` sets `PlayResX`/`PlayResY` to
+  whatever resolution the caller supplies (typically the real input
+  video's, via `probe_video_resolution()`), not a hardcoded canonical
+  resolution. ch. 18's `margin_v: 120`/`100` pixel values were almost
+  certainly chosen with some specific target resolution in mind (likely
+  the final render's `1080x1920`, ch. 18 `render.final.resolution`), but
+  ch. 09's pipeline lists subtitle burn-in as step 5 and final encoding
+  (where resolution presumably gets normalized) as step 7 - meaning
+  nothing in the pipeline today guarantees a clip is at that resolution
+  by the time subtitles are burned into it. `burn_subtitles()` doesn't try
+  to solve this (resolution scaling isn't this phase's job, same
+  reasoning as `concat_clips()` not sorting), but until some phase
+  actually assigns and builds a resolution-normalization step, ch. 18's
+  specific margin values are only meaningful for whatever resolution a
+  clip happens to already be at.
+
+- `generate_ass()`'s style colors (white text, black outline/shadow) are
+  this module's own default, not a ch. 18 spec value - the config block
+  gives font/size/outline-width/shadow-width but no color fields. If a
+  future phase (or a real design pass) specifies actual colors, this
+  style block will need updating; nothing currently enforces that these
+  defaults match what SEOULKIT actually wants visually.
 
 - Clarified, not fixed (nothing was wrong): when `render/hold.py::hold_clip()`'s
   `hold_ms < 1` guard was temporarily removed to red/green-test it,
