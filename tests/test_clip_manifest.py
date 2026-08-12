@@ -81,6 +81,44 @@ def test_shot_missing_from_manifest_is_blocking(tmp_path):
     assert issues[0].segment_ref == "beat=1 shot=1B"
 
 
+def test_duplicate_shot_in_manifest_is_blocking(tmp_path):
+    # A dict built by iterating clips[] would silently let the second entry
+    # win, hiding the ambiguity entirely. That's exactly the bug this test
+    # guards against - even though the second entry happens to match
+    # edit_plan.json (i.e. a naive last-wins comparison would report no
+    # issues at all), the duplicate itself must still be reported.
+    plan = base_plan_with_segment()
+    manifest_path = tmp_path / "clip_manifest.json"
+    write_manifest(
+        manifest_path,
+        [
+            base_manifest_entry(usable_end_ms=1111),  # stale/wrong entry, listed first
+            base_manifest_entry(),  # "correct" entry, listed second - matches edit_plan.json
+        ],
+    )
+
+    issues = check_clip_manifest_consistency(plan, manifest_path)
+
+    assert len(issues) == 1
+    assert issues[0].code == "CLIP_MANIFEST_DUPLICATE_SHOT"
+    assert issues[0].severity == "blocking"
+    assert "1A" in issues[0].detail
+
+
+def test_duplicate_shot_suppresses_further_checks_for_that_shot(tmp_path):
+    # Once a shot is flagged as ambiguous, comparing edit_plan.json against
+    # whichever manifest entry happens to win the dict build would add a
+    # second, potentially misleading issue on top of the ambiguity itself.
+    plan = base_plan_with_segment(usable_end_ms=999)  # would also mismatch, if compared
+    manifest_path = tmp_path / "clip_manifest.json"
+    write_manifest(manifest_path, [base_manifest_entry(), base_manifest_entry()])
+
+    issues = check_clip_manifest_consistency(plan, manifest_path)
+
+    assert len(issues) == 1  # only CLIP_MANIFEST_DUPLICATE_SHOT, no CLIP_MANIFEST_MISMATCH alongside it
+    assert issues[0].code == "CLIP_MANIFEST_DUPLICATE_SHOT"
+
+
 @pytest.mark.parametrize("field", ["usable_start_ms", "usable_end_ms", "key_event_end_ms", "settle_start_ms"])
 def test_field_mismatch_is_blocking(tmp_path, field):
     plan = base_plan_with_segment(**{field: 999})
