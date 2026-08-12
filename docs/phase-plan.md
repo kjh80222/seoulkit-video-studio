@@ -49,6 +49,26 @@ go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
 
+- The Phase 6 manual visual QC pass (sample render, reviewed by the user)
+  only exercised English text on `bottom-center`. Two things it did *not*
+  verify with a real render, both still open:
+  1. Korean subtitle rendering - `tests/test_subtitle.py` proves Korean
+     text round-trips correctly through `generate_ass()`/`generate_srt()`
+     as text (string equality), and Phase 6 development confirmed via
+     `fc-list`/an actual burn that a CJK-capable font (WenQuanYi Zen Hei)
+     is available as a fontconfig fallback for glyphs "Noto Sans KR"
+     itself doesn't have installed - but nobody has looked at an actual
+     rendered frame of Korean subtitle text to confirm it's legible, not
+     just "some glyph got drawn."
+  2. `top-center` has zero real-render coverage - only `bottom-center` was
+     in the manually-reviewed sample. Not yet checked: whether `top-center`
+     collides with anything an overlay places up there (relevant once
+     Phase 7 exists) or otherwise looks wrong in practice.
+
+  Pick a real sample project with Korean subtitle text and a `top-center`
+  entry before either is assumed to work outside of what the string-level
+  tests already prove.
+
 - **Severity: real and OS-dependent, not a rare edge case.**
   `render/subtitle.py::burn_subtitles()` rejects a colon in `ass_path` with
   a `ValueError` before ever invoking FFmpeg (FFmpeg's own filtergraph
