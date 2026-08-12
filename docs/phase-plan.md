@@ -10,7 +10,7 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 2 | PLAN STATUS / STUDIO EXECUTION RESULT separation | Original `edit_plan.json` file is provably unmodified even when it's malformed | ✅ Done |
 | 2.5 | `clip_manifest.json` cross-validation (spec ch. 24: "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies", "READ FOR VALIDATION ≠ RECALCULATE") | `edit_plan.json` usable-range fields that disagree with Stage 3's recorded values in `clip_manifest.json` are flagged as a blocking issue; neither file is ever modified by this check | ✅ Done |
 | 3 | Single-clip trim + FFmpeg execution | One clip trims to the exact expected boundaries | ✅ Done |
-| 4 | Concat | Multiple segments concatenate correctly | Not started |
+| 4 | Concat | Multiple segments concatenate correctly | ✅ Done |
 | 5 | Hold handling (`source_hold` = no filter / `settle_frame_hold` = `tpad`) | Explicit test that `hold_ms` is never double-applied | Not started |
 | 6 | ASS subtitle generation + burn-in | Subtitle position/style actually burns into the render | Not started |
 | 7 | Overlay rendering | Preset coordinates verified | Not started |
@@ -19,14 +19,15 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | Not started |
 | 11 | CLI integration | End-to-end test | Not started |
 
-Phase 0 through Phase 3 are implemented (`src/seoulkit_studio/schema/`,
+Phase 0 through Phase 4 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
 including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
-including `render/time_format.py` and `render/trim.py`; 132/132 tests
-passing as of this update, with 5 of those requiring a system `ffmpeg`/
-`ffprobe` install and auto-skipping when absent). Phase 4 onward are not
-started and should not be assumed to work - do not reimplement Phase
-0/1/2/2.5/3 in a new session; extend from here.
+including `render/time_format.py`, `render/trim.py`, and
+`render/concat.py`; 140/140 tests passing as of this update, with 10 of
+those requiring a system `ffmpeg`/`ffprobe` install and auto-skipping
+when absent). Phase 5 onward are not started and should not be assumed to
+work - do not reimplement Phase 0/1/2/2.5/3/4 in a new session; extend
+from here.
 
 Phase 3 introduces the project's first external system dependency:
 `ffmpeg`/`ffprobe` must be installed to run the full test suite (not just
@@ -38,6 +39,35 @@ fixture video is committed to the repo - `tests/conftest.py`'s
 go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
+
+- `render/concat.py::concat_clips()` does not sort `clip_paths` - it joins
+  them in exactly the order given. Determining beat/shot ascending order
+  (ch. 10) requires reading `edit_plan.json`, which `concat_clips()`
+  deliberately has no knowledge of (same layering as `trim_clip()` never
+  recomputing `clip_in_ms`). This means **the assembly layer that turns
+  `edit_plan.json`'s `segments[]` into an ordered `list[Path]` of
+  Phase-3-trimmed files does not exist yet**, and until it does, nothing
+  actually enforces the ordering contract end-to-end - only
+  `concat_clips()`'s own unit test
+  (`tests/test_concat.py::test_concat_preserves_the_given_order_not_sorted`)
+  proves the function itself honors it. Whichever phase first builds that
+  assembly step (likely Phase 9-11, when a real multi-segment pipeline run
+  gets wired up) must pass an already-sorted list, and should be reviewed
+  specifically for that.
+
+  Worth remembering when that assembly layer gets built: this same test
+  demonstrated that a `sorted(clip_paths)` reorder is a *silent* bug -
+  FFmpeg raised no error and produced a fully valid, fully wrong-order
+  video. That's different from two other bugs deliberately injected during
+  Phase 3/4 development (writing over the source clip's own path, and
+  mapping the concat filter's unconnected output), both of which FFmpeg
+  itself refused outright ("cannot edit existing files in-place",
+  "unconnected output"). Ordering mistakes get no such safety net from
+  FFmpeg - only a real-content test (here, distinguishable colored clips
+  sampled by actual pixel value, not just duration) catches them. Phase 5
+  (`tpad`, actually manipulating frames) should assume the same: FFmpeg
+  will not save it from a logic error, only a test that inspects real
+  output content will.
 
 - Phase 3's `render/trim.py::trim_clip()` returns a `TrimResult` carrying
   the exact `command` (list[str]) and `stderr`/`stdout` it produced, but
