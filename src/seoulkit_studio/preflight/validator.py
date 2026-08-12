@@ -29,6 +29,14 @@ ordering):
   schema (sfx action enum excludes "candidate"; bgm allOf requires `file`
   when mode="selected") - see the comment on `check_time_consistency`
   below for why this isn't reimplemented here.
+
+`hold_ms` field validity (hold_strategy-vs-zero) is a Phase 0 schema `allOf`
+constraint, but the ch. 18 `hold.settle_frame_hold.max_ms` cap (default
+1500ms, per-segment) is a config value, not a schema constraint - nothing
+enforced it until this check was added. Left unchecked, a `settle_frame_hold`
+segment with an arbitrarily large `hold_ms` would pass Pre-flight cleanly and
+only surface as a problem once Phase 5 actually generated that many held
+frames.
 """
 
 from __future__ import annotations
@@ -55,6 +63,10 @@ SEVERITY_MAPPING: dict[Severity, dict[str, Any]] = {
 }
 
 _SEVERITY_RANK: dict[Severity, int] = {"info": 0, "warning": 1, "blocking": 2}
+
+# ch. 18 `hold.settle_frame_hold.max_ms` default. Per-segment, not cumulative
+# across the video (ch. 18's own comment on this field is explicit about that).
+DEFAULT_MAX_SETTLE_FRAME_HOLD_MS = 1500
 
 
 @dataclass
@@ -155,7 +167,9 @@ def check_file_existence(data: dict[str, Any], project_dir: Path) -> list[Prefli
 
 
 def check_time_consistency(
-    data: dict[str, Any], tolerance_ms: int = DEFAULT_DURATION_TOLERANCE_MS
+    data: dict[str, Any],
+    tolerance_ms: int = DEFAULT_DURATION_TOLERANCE_MS,
+    max_settle_frame_hold_ms: int = DEFAULT_MAX_SETTLE_FRAME_HOLD_MS,
 ) -> list[PreflightIssue]:
     # 04-4 audio layer resolution is not reimplemented here: the Phase 0
     # schema already rejects an unresolved SFX action ("candidate" is not
@@ -174,6 +188,18 @@ def check_time_consistency(
                     "INVALID_CLIP_RANGE", "blocking", f"clip_in_ms({clip_in_ms}) >= clip_out_ms({clip_out_ms})", ref
                 )
             )
+
+        if segment.get("hold_strategy") == "settle_frame_hold":
+            hold_ms = segment.get("hold_ms")
+            if hold_ms is not None and hold_ms > max_settle_frame_hold_ms:
+                issues.append(
+                    PreflightIssue(
+                        "MAX_HOLD_MS_EXCEEDED",
+                        "blocking",
+                        f"hold_ms({hold_ms}) exceeds max_ms({max_settle_frame_hold_ms})",
+                        ref,
+                    )
+                )
 
         usable_start_ms, usable_end_ms = segment.get("usable_start_ms"), segment.get("usable_end_ms")
         if usable_start_ms is None or usable_end_ms is None:
@@ -230,12 +256,17 @@ def check_time_consistency(
 
 
 def run_preflight(
-    data: dict[str, Any], project_dir: Path, duration_tolerance_ms: int = DEFAULT_DURATION_TOLERANCE_MS
+    data: dict[str, Any],
+    project_dir: Path,
+    duration_tolerance_ms: int = DEFAULT_DURATION_TOLERANCE_MS,
+    max_settle_frame_hold_ms: int = DEFAULT_MAX_SETTLE_FRAME_HOLD_MS,
 ) -> PreflightResult:
     structure_issues = check_structure(data)
     if structure_issues:
         return PreflightResult(preflight_result="FAIL", issues=structure_issues)
 
-    issues = check_file_existence(data, project_dir) + check_time_consistency(data, tolerance_ms=duration_tolerance_ms)
+    issues = check_file_existence(data, project_dir) + check_time_consistency(
+        data, tolerance_ms=duration_tolerance_ms, max_settle_frame_hold_ms=max_settle_frame_hold_ms
+    )
     has_blocking = any(issue.severity == "blocking" for issue in issues)
     return PreflightResult(preflight_result="FAIL" if has_blocking else "PASS", issues=issues)
