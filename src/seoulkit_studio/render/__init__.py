@@ -8,6 +8,7 @@ from seoulkit_studio.render.audio_mix import (
     mix_audio,
 )
 from seoulkit_studio.render.concat import ConcatErrorKind, ConcatResult, concat_clips
+from seoulkit_studio.render.encode import EncodeErrorKind, EncodeResult, mux_and_encode
 from seoulkit_studio.render.fonts import FONT_DIR, BundledFontError, resolve_bundled_font
 from seoulkit_studio.render.hold import HoldErrorKind, HoldResult, hold_clip
 from seoulkit_studio.render.overlay import (
@@ -20,6 +21,17 @@ from seoulkit_studio.render.overlay import (
     build_overlay_filter,
     burn_overlays,
     resolve_font_file,
+)
+from seoulkit_studio.render.pipeline import (
+    FINAL_CRF,
+    FINAL_RESOLUTION,
+    PREVIEW_CRF,
+    PREVIEW_RESOLUTION,
+    PREVIEW_WATERMARK_TEXT,
+    GateError,
+    RenderResult,
+    render_final,
+    render_preview,
 )
 from seoulkit_studio.render.subtitle import (
     SUBTITLE_POSITION_PRESETS,
@@ -72,4 +84,16 @@ __all__ = [
     "build_overlay_filter",
     "burn_overlays",
     "resolve_font_file",
+    "EncodeErrorKind",
+    "EncodeResult",
+    "mux_and_encode",
+    "FINAL_CRF",
+    "FINAL_RESOLUTION",
+    "PREVIEW_CRF",
+    "PREVIEW_RESOLUTION",
+    "PREVIEW_WATERMARK_TEXT",
+    "GateError",
+    "RenderResult",
+    "render_final",
+    "render_preview",
 ]
