@@ -1,7 +1,82 @@
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
+
+
+@pytest.fixture
+def measure_mean_volume_db():
+    """Real decode + FFmpeg's own `volumedetect` filter - not a guess from
+    file size or duration. `start_ms`/`end_ms` optionally restrict the
+    measurement window, so a test can distinguish "quiet here" from "loud
+    there" within a single mixed file (e.g. BGM before vs. during a ducking
+    window)."""
+
+    def _measure(path: Path, *, start_ms: int | None = None, end_ms: int | None = None) -> float:
+        command = ["ffmpeg", "-y"]
+        if start_ms is not None:
+            command += ["-ss", f"{start_ms / 1000:.3f}"]
+        command += ["-i", str(path)]
+        if end_ms is not None:
+            duration_s = (end_ms - (start_ms or 0)) / 1000
+            command += ["-t", f"{duration_s:.3f}"]
+        command += ["-af", "volumedetect", "-f", "null", "-"]
+
+        proc = subprocess.run(command, capture_output=True, text=True, check=True)
+        match = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", proc.stderr)
+        assert match, f"no mean_volume found in ffmpeg output:\n{proc.stderr}"
+        return float(match.group(1))
+
+    return _measure
+
+
+@pytest.fixture
+def measure_lowpass_mean_volume_db():
+    """Same real measurement as `measure_mean_volume_db`, but through a
+    `lowpass` filter first - lets a test isolate a low-frequency track
+    (e.g. a BGM bed) from a higher-frequency one mixed on top of it (e.g.
+    dialogue) in the same file, without needing separate stems. Not a
+    perfect brick-wall separation (a lowpass filter has rolloff, not an
+    instant cutoff), so tests using this should pick source frequencies
+    well apart from `cutoff_hz`, not just barely on either side of it."""
+
+    def _measure(
+        path: Path, *, cutoff_hz: int = 250, start_ms: int | None = None, end_ms: int | None = None
+    ) -> float:
+        command = ["ffmpeg", "-y"]
+        if start_ms is not None:
+            command += ["-ss", f"{start_ms / 1000:.3f}"]
+        command += ["-i", str(path)]
+        if end_ms is not None:
+            duration_s = (end_ms - (start_ms or 0)) / 1000
+            command += ["-t", f"{duration_s:.3f}"]
+        command += ["-af", f"lowpass=f={cutoff_hz},volumedetect", "-f", "null", "-"]
+
+        proc = subprocess.run(command, capture_output=True, text=True, check=True)
+        match = re.search(r"mean_volume:\s*(-?[\d.]+)\s*dB", proc.stderr)
+        assert match, f"no mean_volume found in ffmpeg output:\n{proc.stderr}"
+        return float(match.group(1))
+
+    return _measure
+
+
+@pytest.fixture
+def measure_integrated_lufs():
+    """Real EBU R128 measurement (`ebur128` filter) of a whole file's
+    integrated loudness - the same metric `loudnorm`'s `I=` target uses, so
+    this is a direct check of whether a normalize pass actually landed near
+    its target, not a proxy."""
+
+    def _measure(path: Path) -> float:
+        command = ["ffmpeg", "-y", "-i", str(path), "-af", "ebur128", "-f", "null", "-"]
+        proc = subprocess.run(command, capture_output=True, text=True, check=True)
+        summary = proc.stderr.rsplit("Summary:", 1)[-1]
+        match = re.search(r"I:\s*(-?[\d.]+)\s*LUFS", summary)
+        assert match, f"no integrated loudness found in ffmpeg output:\n{proc.stderr}"
+        return float(match.group(1))
+
+    return _measure
 
 
 @pytest.fixture
