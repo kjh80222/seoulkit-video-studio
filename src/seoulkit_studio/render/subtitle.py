@@ -46,6 +46,17 @@ bundled "Noto Sans KR" files are committed as ordinary binary assets - see
 family-name matching within that directory, but the directory now actually
 contains the requested family instead of leaving the outcome up to whatever
 else is installed.
+
+Windows path escaping: `burn_subtitles()` used to `raise ValueError` if
+`ass_path`/`FONT_DIR` contained a colon - refusing to run rather than
+misparsing, since a Windows drive-letter colon (`C:\...`) is the normal
+shape of an absolute path there, not a rare edge case. That guard is gone;
+both values now go through `render.filter_escape.escape_filter_path()`
+instead, which produces a filtergraph value FFmpeg parses correctly
+(verified empirically against a real FFmpeg binary, not assumed from
+documentation - see that module's own docstring for the exact rule and
+how it was determined). On an ordinary POSIX path this is a no-op, so
+existing behavior on Linux/macOS is unchanged.
 """
 
 from __future__ import annotations
@@ -56,6 +67,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from seoulkit_studio.render.filter_escape import escape_filter_path
 from seoulkit_studio.render.fonts import BundledFontError, FONT_DIR, resolve_bundled_font
 from seoulkit_studio.render.time_format import ms_to_ass_timestamp, ms_to_ffmpeg_timestamp
 
@@ -155,24 +167,6 @@ class BurnInResult:
 
 
 def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path) -> BurnInResult:
-    # FFmpeg's filtergraph parser treats ':' as an option separator inside a
-    # -vf argument. An unescaped colon in ass_path (e.g. a Windows
-    # C:\... path - not a rare edge case on that OS, but the normal case)
-    # would otherwise surface as a confusing filtergraph parse error from
-    # FFmpeg itself. Failing loudly here, before FFmpeg ever runs, gives a
-    # clear diagnosis instead - same "fail loud, not quiet" stance as every
-    # other guard in this pipeline (see docs/phase-plan.md Known gaps for
-    # why this is flagged as a real, not theoretical, limitation).
-    if ":" in str(ass_path):
-        raise ValueError(
-            f"ass_path must not contain ':' (FFmpeg filtergraph syntax would misparse it), got {ass_path!r}"
-        )
-    if ":" in str(FONT_DIR):
-        raise ValueError(
-            f"bundled font directory must not contain ':' (FFmpeg filtergraph syntax would misparse it), "
-            f"got {FONT_DIR!r}"
-        )
-
     try:
         resolve_bundled_font("regular")
     except BundledFontError as exc:
@@ -200,7 +194,7 @@ def burn_subtitles(video_path: Path, ass_path: Path, output_path: Path) -> BurnI
         ffmpeg_bin,
         "-y",
         "-i", str(video_path),
-        "-vf", f"ass={ass_path}:fontsdir={FONT_DIR}",
+        "-vf", f"ass={escape_filter_path(ass_path)}:fontsdir={escape_filter_path(FONT_DIR)}",
         "-an",
         "-c:v", "libx264",
         str(output_path),
