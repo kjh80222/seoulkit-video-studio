@@ -118,6 +118,10 @@ def test_final_never_invokes_ffmpeg_when_review_required(demo_project, monkeypat
     assert result.gated
     assert result.gate_error == "review_required"
     assert calls == []
+    # render_final() itself never knows about version-numbered report/log
+    # paths - only render/report.py::_run_and_report() stamps those on.
+    assert result.report_path is None
+    assert result.log_path is None
 
 
 def test_final_never_invokes_ffmpeg_when_not_ready(tmp_path, monkeypatch):
