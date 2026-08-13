@@ -27,6 +27,19 @@ instead of a fixed pixel size) are this module's own default, not derived
 from spec - see `docs/phase-plan.md` Known gaps. `watermark_text=None`
 (the Final path's case) skips the `drawtext` filter entirely - Final never
 gets a watermark, per ch.08.
+
+Windows path escaping: the watermark's `fontfile=` value went straight
+into the filtergraph unescaped, same unguarded gap as `overlay.py`'s
+`drawtext` usage (the bundled font's install-directory path always
+contains a drive-letter colon on Windows) - and the same silent failure
+mode: an unescaped colon there doesn't crash FFmpeg, it truncates the
+`fontfile=` value at the colon and FFmpeg quietly falls back to some
+other font, so a Windows watermark would have rendered in the wrong
+typeface with no error anywhere (see `overlay.py`'s module docstring for
+the full empirical finding, which applies identically here). Now routed
+through `render.filter_escape.escape_filter_path()`, the same shared
+helper every `fontfile=`/`ass=`/`fontsdir=` call site in this package
+uses.
 """
 
 from __future__ import annotations
@@ -37,6 +50,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from seoulkit_studio.render.filter_escape import escape_filter_path
 from seoulkit_studio.render.fonts import BundledFontError, resolve_bundled_font
 
 EncodeErrorKind = Literal["ffmpeg_not_found", "ffmpeg_failed", "bundled_font_error"]
@@ -95,7 +109,7 @@ def mux_and_encode(
             )
         text = _escape_drawtext_text(watermark_text)
         vf_filters.append(
-            f"drawtext=fontfile={font_path}:text='{text}':"
+            f"drawtext=fontfile={escape_filter_path(font_path)}:text='{text}':"
             f"fontcolor=white@0.4:fontsize=h*0.05:"
             f"x=(w-text_w)/2:y=(h-text_h)/2"
         )
