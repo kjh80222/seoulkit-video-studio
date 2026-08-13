@@ -10,6 +10,15 @@ for writing.
 Out of scope for Phase 2/2.5: the full Render Report format (`plan_status_as_declared`
 + `effective_status` + `studio_execution_result` together, ch. 17) is Phase 10's
 job, not this module's - this only computes the values, it doesn't format a report.
+
+`EvaluationResult.plan_status_as_declared` (added for Phase 10) was already
+computed here as a local variable and fed into `compute_effective_status()`,
+but never handed back to the caller - Phase 10's Render Report needs it
+alongside `effective_status` (ch. 17: recording both is how a report shows
+Stage 4's declared status and Stage 5's own judgment diverged, e.g. plan
+said READY but a blocking issue downgraded it to NOT_READY). This is a pure
+additive exposure of a value already computed here - `evaluate_plan()`
+still runs exactly once per call, no new computation.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ class EvaluationResult:
     clip_manifest_issues: list[PreflightIssue] = field(default_factory=list)
     studio_execution_result: StudioExecutionResult = "PASS"
     effective_status: PlanStatus = "READY"
+    plan_status_as_declared: str | None = None
 
 
 def evaluate_plan(
@@ -49,7 +59,7 @@ def evaluate_plan(
     if not load_result.ok:
         execution_result = compute_execution_result(load_result.error, [])
         effective_status = compute_effective_status(execution_result, None, [])
-        return EvaluationResult(load_result.error, None, [], execution_result, effective_status)
+        return EvaluationResult(load_result.error, None, [], execution_result, effective_status, None)
 
     preflight_result = run_preflight(load_result.data, project_dir, duration_tolerance_ms=duration_tolerance_ms)
 
@@ -69,4 +79,6 @@ def evaluate_plan(
     plan_status_as_declared = load_result.data.get("status") if isinstance(load_result.data, dict) else None
     effective_status = compute_effective_status(execution_result, plan_status_as_declared, all_issues)
 
-    return EvaluationResult(None, preflight_result, clip_manifest_issues, execution_result, effective_status)
+    return EvaluationResult(
+        None, preflight_result, clip_manifest_issues, execution_result, effective_status, plan_status_as_declared
+    )
