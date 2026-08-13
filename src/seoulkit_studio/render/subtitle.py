@@ -49,7 +49,7 @@ else is installed.
 
 Windows path escaping: `burn_subtitles()` used to `raise ValueError` if
 `ass_path`/`FONT_DIR` contained a colon - refusing to run rather than
-misparsing, since a Windows drive-letter colon (`C:\...`) is the normal
+misparsing, since a Windows drive-letter colon (`C:\\...`) is the normal
 shape of an absolute path there, not a rare edge case. That guard is gone;
 both values now go through `render.filter_escape.escape_filter_path()`
 instead, which produces a filtergraph value FFmpeg parses correctly
