@@ -107,6 +107,18 @@ it up into the Render Report's `errors[]` with zero changes needed in
 that module - `report.py` only gained two small cosmetic dict entries
 (`_STAGE_NAMES`/`_ERROR_MESSAGES`) for a friendlier `stage`/`message`,
 nothing contract-shaped.
+
+`RenderResult.report_path`/`log_path` (added for Phase 11 CLI): additive,
+default-`None` fields this module itself never sets - `render_preview()`/
+`render_final()` don't know the version-numbered `preview/`/`output/`/
+`logs/` paths a caller will use, only `render/report.py::_run_and_report()`
+does. That function fills these in on the already-built `RenderResult`
+right before returning it, so the CLI can print exactly where a report/log
+landed without recomputing `_preview_paths()`/`_final_paths()`/
+`_log_paths()` itself. Deliberately not added to `RenderReport`: that
+dataclass is persisted verbatim as ch. 17's Render Report JSON
+(`json.dumps(asdict(report), ...)` in `report.py`), and this phase must not
+change that already-shipped schema.
 """
 
 from __future__ import annotations
@@ -179,6 +191,8 @@ class RenderResult:
     effective_status: PlanStatus | None = None
     plan_status_as_declared: str | None = None
     preflight_issues: list[PreflightIssue] = field(default_factory=list)
+    report_path: Path | None = None
+    log_path: Path | None = None
 
     @property
     def gated(self) -> bool:
