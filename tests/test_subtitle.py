@@ -133,11 +133,30 @@ def test_generate_srt_joins_multiple_lines_with_real_newline():
 # --- burn_subtitles(): pure logic, no real ffmpeg execution needed ---------
 
 
-def test_colon_in_ass_path_is_rejected_before_ffmpeg_runs(tmp_path):
-    bad_ass_path = tmp_path / "sub:title.ass"  # colon in filename
+@requires_ffmpeg
+def test_colon_in_ass_path_is_escaped_and_burns_in_successfully(
+    tmp_path, make_solid_color_video, frame_region_stddev
+):
+    # Regression test for the Windows path-escaping hotfix: a colon in
+    # ass_path (e.g. a Windows drive-letter path, or - as reproduced here,
+    # since a colon is a legal POSIX filename character - a real directory
+    # named with one) used to raise ValueError before FFmpeg ever ran.
+    # burn_subtitles() must now escape it and actually burn the subtitle in,
+    # not refuse to run.
+    colon_dir = tmp_path / "fake:windows-style-dir"
+    colon_dir.mkdir()
+    video = make_solid_color_video(colon_dir / "bg.mp4", duration_ms=2000, color="navy", size="640x360")
+    ass_path = colon_dir / "sub:title.ass"
+    ass_path.write_text(
+        generate_ass([one_subtitle(start_ms=500, end_ms=1500, position_preset="bottom-center")], 640, 360)
+    )
 
-    with pytest.raises(ValueError):
-        burn_subtitles(tmp_path / "in.mp4", bad_ass_path, tmp_path / "out.mp4")
+    result = burn_subtitles(video, ass_path, colon_dir / "out.mp4")
+
+    assert result.ok, result.stderr
+    assert result.error is None
+    on_stddev = frame_region_stddev(result.output_path, at_ms=1000)
+    assert on_stddev > 10.0  # subtitle text actually drawn, not a silently empty frame
 
 
 def test_ffmpeg_not_found_is_reported_without_raising(tmp_path, monkeypatch):
