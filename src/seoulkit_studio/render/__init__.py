@@ -9,6 +9,7 @@ from seoulkit_studio.render.audio_mix import (
 )
 from seoulkit_studio.render.concat import ConcatErrorKind, ConcatResult, concat_clips
 from seoulkit_studio.render.encode import EncodeErrorKind, EncodeResult, mux_and_encode
+from seoulkit_studio.render.filter_escape import escape_filter_path
 from seoulkit_studio.render.fonts import FONT_DIR, BundledFontError, resolve_bundled_font
 from seoulkit_studio.render.hold import HoldErrorKind, HoldResult, hold_clip
 from seoulkit_studio.render.overlay import (
@@ -96,6 +97,7 @@ __all__ = [
     "EncodeErrorKind",
     "EncodeResult",
     "mux_and_encode",
+    "escape_filter_path",
     "FINAL_CRF",
     "FINAL_RESOLUTION",
     "PREVIEW_CRF",
