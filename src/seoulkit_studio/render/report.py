@@ -62,6 +62,14 @@ gaps both flag this as an open Phase 9 defect). Fixing that here would
 quietly patch over a Phase 9 bug from inside a Phase 10 module and hide
 that it needs its own fix - `output_file` is correctly recorded as `null`
 on failure regardless of whether a stray file happens to sit on disk.
+
+Phase 11: `_run_and_report()` now also stamps the `report_path`/`log_path`
+it already computed onto the `RenderResult` it returns (see
+`render/pipeline.py`'s module docstring for why those live on
+`RenderResult` and not on `RenderReport`) - the CLI reads them from there
+instead of re-deriving version-numbered paths itself. The persisted
+Render Report JSON built and written above is completely unchanged by
+this; the two new fields exist only on the in-memory return value.
 """
 
 from __future__ import annotations
@@ -310,6 +318,13 @@ def _run_and_report(
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_text = "\n".join(ffmpeg_commands)
     log_path.write_text(log_text + "\n" if log_text else "")
+
+    # Phase 11: additive exposure on RenderResult only (see pipeline.py's
+    # module docstring) - report_path/log_path are set here, after both
+    # files actually exist on disk, and nowhere near the RenderReport
+    # dataclass that gets persisted as ch. 17's JSON above.
+    result.report_path = report_path
+    result.log_path = log_path
 
     return result, report
 
