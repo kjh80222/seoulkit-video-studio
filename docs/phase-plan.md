@@ -17,32 +17,167 @@ v1.0, ch. 21. Each phase's "done" criterion is the spec's own.
 | 8 | Audio mix (adopted/selected only, ducking, loudness) | Unresolved SFX/BGM forces the mix into REVIEW_REQUIRED | ✅ Done (automated tests + real dB/LUFS measurement, see Known gaps) |
 | 9 | Preview/Final split, hard gate | Final is refused while REVIEW_REQUIRED | ✅ Done |
 | 10 | Render report (records both plan_status and effective_status) | Report field completeness | ✅ Done |
-| 11 | CLI integration | End-to-end test | Not started |
+| 11 | CLI integration | End-to-end test | ✅ Done |
 
-Phase 0 through Phase 10 are implemented (`src/seoulkit_studio/schema/`,
+Phase 0 through Phase 11 are implemented (`src/seoulkit_studio/schema/`,
 `src/seoulkit_studio/preflight/`, `src/seoulkit_studio/execution/`
 including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
 including `render/time_format.py`, `render/trim.py`, `render/concat.py`,
 `render/hold.py`, `render/subtitle.py`, `render/fonts.py`,
 `render/overlay.py`, `render/audio_mix.py`, `render/encode.py`,
-`render/pipeline.py`, `render/report.py`, and `render/filter_escape.py`;
-344/344 tests passing as of this update, with the ffmpeg/ffprobe-requiring
-subset auto-skipping when those tools are absent). Phase 11 onward is not
-started and should not be assumed to work - do not reimplement Phase
-0/1/2/2.5/3/4/5/6/7/8/9/10 in a new session; extend from here.
+`render/pipeline.py`, `render/report.py`, `render/filter_escape.py`, and
+`src/seoulkit_studio/cli/` (`project.py`, `exit_codes.py`,
+`report_lookup.py`, `output.py`, `main.py`); 394/394 tests passing as of
+this update, with the ffmpeg/ffprobe-requiring subset auto-skipping when
+those tools are absent. Nothing beyond Phase 11 is started - do not
+reimplement Phase 0/1/2/2.5/3/4/5/6/7/8/9/10/11 in a new session; extend
+from here.
 
-**Phase 11 is explicitly not started, on the user's direct instruction.**
 The Phase 9 partial-output hotfix planned after Phase 10 (see Known gaps:
 `mux_and_encode()`/`.ass`/`.srt` could leave partial or stale output at the
 real destination on failure) is done and E2E-verified against a real
 render (Preview + Final, real FFmpeg, frame-inspected) before Phase 11
 planning began. A separate Windows FFmpeg filtergraph path-escaping
-hotfix (see Known gaps) has also been completed since then, investigated
-and applied before starting Phase 11 CLI work specifically so the CLI
-would not be built on top of a still-open Windows-blocking defect - full
-regression passing (344/344), Linux-tested only, native Windows execution
-still unverified (see that Known gaps entry for exactly what remains
-open). Phase 11 (CLI integration) planning follows this hotfix.
+hotfix (see Known gaps) was completed next, investigated and applied
+before starting Phase 11 CLI work specifically so the CLI would not be
+built on top of a still-open Windows-blocking defect - Linux-tested only,
+native Windows execution still unverified (see that Known gaps entry for
+exactly what remains open). Neither hotfix's code
+(`render/filter_escape.py`, `subtitle.py`, `overlay.py`, `encode.py`,
+`render/pipeline.py`'s publish commit/rollback) was touched again during
+Phase 11.
+
+**Phase 11 (`seoulkit-studio` CLI) is done.** `src/seoulkit_studio/cli/`
+is a thin orchestration layer, deliberately kept that way: every command
+handler in `cli/main.py` resolves paths (`cli/project.py`), calls exactly
+one existing public API function, and formats the result
+(`cli/output.py`) - no `cmd_*` function recomputes `effective_status`,
+re-implements the ch. 05 gate, assigns a render version, or touches
+publish/rollback logic.
+
+Command surface (`[project.scripts]` entry point `seoulkit-studio`,
+`argparse`-only, no new dependency): `preflight` (alias `validate`) calls
+`evaluate_plan()` only - read-only, no FFmpeg, no file writes. `preview`
+and `render` (alias `final`) call `render_preview_and_report()`/
+`render_final_and_report()` directly, **not** `evaluate_plan()` separately
+- those functions already call it internally once, and
+`test_cli_main.py::test_preview_calls_evaluate_plan_exactly_once`/
+`test_render_calls_evaluate_plan_exactly_once` spy on
+`render/pipeline.py`'s own `evaluate_plan` reference to prove it's called
+exactly once per invocation, not assumed. `status` and `report` are
+read-only lookups over files a prior `preview`/`render` already wrote
+(`cli/report_lookup.py`) - they never call `evaluate_plan()` or any
+`render_*` function; `test_cli_main.py` proves this by monkeypatching
+`evaluate_plan` to raise if called at all, not just by checking output.
+
+`clip_manifest.json` is always resolved to its conventional default path
+(`<project>/clips/clip_manifest.json`, override via `--clip-manifest`)
+and always passed through to `evaluate_plan()`/the render functions
+**regardless of whether the file exists** - `cli/project.py` does no
+existence checking or `None`-substitution of its own, so a missing
+manifest surfaces exactly through the pre-existing `CLIP_MANIFEST_MISSING`
+warning path (`execution/clip_manifest.py`), proven end-to-end by
+`test_cli_main.py::test_preflight_exits_one_on_review_required` and
+`test_preview_exits_zero_and_surfaces_review_required_when_gate_allows_it`
+against a project with no `clip_manifest.json` on disk at all.
+
+Exit codes (`cli/exit_codes.py`): `0` OK, `1` REVIEW_REQUIRED, `2`
+NOT_READY, `3` EXECUTION_FAILED (gate passed, pipeline itself failed), `4`
+USAGE_ERROR. Two corrections came out of a second review pass before
+implementation, both caught before any code was written and both now
+covered by dedicated tests:
+- **`preview` returns `0` under `REVIEW_REQUIRED`, not `1`.** ch. 05 lets
+  Preview run under both READY and REVIEW_REQUIRED, so a successful
+  Preview is a success regardless of which one produced it -
+  `effective_status` is still surfaced in both human and `--json` output
+  either way (`test_preview_exits_zero_and_surfaces_review_required_when_gate_allows_it`).
+  `1` is reserved for `preflight`'s own REVIEW_REQUIRED verdict and for
+  `render`'s REVIEW_REQUIRED gate rejection (next point) - it never means
+  "Preview ran under a non-READY plan."
+- **`render`'s REVIEW_REQUIRED gate rejection maps to `1`, not `2`.** The
+  first draft of this mapping assumed `gate_error == "not_ready"` covered
+  every non-READY case for Final, which is wrong:
+  `render/pipeline.py::_render()` actually sets
+  `gate_error = "not_ready" if effective_status == "NOT_READY" else "review_required"`,
+  confirmed against `tests/test_pipeline.py::test_final_never_invokes_ffmpeg_when_review_required`
+  before writing the CLI mapping, not assumed. `cmd_render()` branches on
+  the real value: `"review_required"` -> `1`, `"not_ready"` -> `2`.
+  Red/green-demonstrated: temporarily reverting `cmd_render()` to the
+  wrong single-branch version made
+  `test_cli_main.py::test_render_exits_one_on_review_required` fail with
+  exit `3` instead of `1` (falling through to the execution-failed branch,
+  not even landing on the intuitively-plausible wrong answer of `2`) -
+  restoring the two-branch version made it pass again, full suite still
+  394/394 afterward.
+
+`RenderResult.report_path`/`log_path` (additive, `render/pipeline.py`)
+expose exactly the paths `render/report.py::_run_and_report()` already
+computes, so the CLI never recomputes `_preview_paths()`/`_final_paths()`/
+`_log_paths()` itself. These fields were deliberately **not** added to
+`RenderReport` - that dataclass is persisted verbatim as ch. 17's Render
+Report JSON (`json.dumps(asdict(report), ...)`), and adding fields there
+would have changed an already-shipped, already-persisted schema. This was
+a real correction from a second review pass, not a first-draft decision,
+and is now guarded by
+`tests/test_report.py::test_persisted_render_report_json_never_gains_report_path_or_log_path`
+- red/green-demonstrated by temporarily adding `report_path`/`log_path`
+fields directly to `RenderReport` (the originally-proposed, rejected
+design) and confirming that exact test fails (`asdict(report)` gains the
+keys); reverting made it pass again.
+
+`status`/`report` (`cli/report_lookup.py`) resolve "the latest render"
+by glob-scanning `preview/`, `output/`, `logs/` for `*.render_report.json`
+files and reading each file's own already-recorded `render_version`
+field, rather than reusing `render/report.py::next_render_version()` -
+that function answers a different question ("what's the next free slot to
+write"), and a given version's report can land in any one of the three
+directories depending on `render_type` and outcome (success vs.
+gate-rejected/failed), so there is no formula for "where," only the fact
+of what's actually on disk.
+`test_cli_report_lookup.py::test_latest_report_picks_the_max_version_regardless_of_which_directory_holds_it`
+deliberately places the max version's report in `logs/` (a
+gate-rejected/failed attempt) rather than `preview/`/`output/`, so a bug
+that only scanned the success-shaped directories would be caught, not
+coincidentally masked.
+
+Real end-to-end command sequence verified against a hand-built two-shot
+project (real FFmpeg, no mocks): `preflight` (REVIEW_REQUIRED before a
+`clip_manifest.json` exists, exit `1`) -> `preview` (still succeeds under
+REVIEW_REQUIRED, exit `0`, real `preview_v001.mp4` produced) -> `render`
+(refused, `gate_error="review_required"`, exit `1`, no `final_v001.*`
+written) -> adding `clip_manifest.json` -> `preflight` (READY, exit `0`)
+-> `render` (succeeds, `output/final_v004.mp4` + `.ass` + `.srt`, exit
+`0`, version continues the same shared sequence rather than restarting)
+-> `status --json` and `report --version 1 --json` both read back exactly
+the persisted values, matching `output/final_v004.render_report.json`'s
+own recorded fields with zero drift.
+
+The `ffprobe`-lacks-`shutil.which()`-guard gap (open since the Phase 11
+investigation, see Known gaps) was deliberately left unfixed inside
+`subtitle.py`/`report.py` - fixing it there would be rendering-primitive
+work outside Phase 11's approved scope. Instead `cli/main.py::main()`
+wraps command dispatch in a single top-level `try/except Exception`,
+mapping any such unhandled error (this one included) to exit `4` with a
+JSON-safe message instead of a raw traceback -
+`test_cli_main.py::test_missing_ffprobe_is_caught_by_the_top_level_handler_not_a_traceback`
+proves this against the real gap (monkeypatches
+`render/report.py`'s own `subprocess.run` to raise
+`FileNotFoundError("ffprobe")` mid-render, after FFmpeg itself has
+already run for real) rather than a synthetic stand-in exception type.
+`ffmpeg` itself never needs this fallback: every `ffmpeg` call site
+already guards via `shutil.which()` and degrades to an ordinary graceful
+stage failure (exit `3`, not `4`) - confirmed by contrast, not assumed,
+via `test_preview_exits_three_on_a_real_execution_failure`/
+`test_render_exits_three_on_a_real_execution_failure`.
+
+CLI-level project-directory existence checking (`project_dir.is_dir()`,
+`cli/main.py::main()`) is the one deliberate exception to "no new
+validation logic" - it's about the directory itself, not about
+`edit_plan.json`/`clip_manifest.json` inside it, both of which are always
+handed to the existing Stage 5 validation as concrete paths regardless of
+whether they exist (a missing `edit_plan.json` inside an existing project
+directory correctly surfaces as NOT_READY through `evaluate_plan()`
+itself, not as a CLI usage error).
 
 Phase 10 (`render/report.py`) implements the Stage 5 spec ch. 17 Render
 Report and owns version-numbered output path assignment
@@ -136,6 +271,29 @@ fixture video is committed to the repo - `tests/conftest.py`'s
 go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
+
+- `ffprobe` call sites (`render/subtitle.py::probe_video_resolution()`,
+  `render/report.py::_probe_duration_ms()`) call `subprocess.run(["ffprobe",
+  ...], check=True)` directly, with no `shutil.which("ffprobe")` guard -
+  unlike every `ffmpeg` call site in this codebase, which all guard that
+  way and degrade to a graceful, reported stage failure when the binary is
+  missing. A missing `ffprobe` instead raises an uncaught
+  `FileNotFoundError` from inside these functions. Found during the Phase
+  11 investigation, not fixed inside `subtitle.py`/`report.py` - that would
+  be rendering-primitive work outside Phase 11's approved scope (CLI
+  orchestration only, no changes to Phase 0-10 primitives). Mitigated, not
+  fixed, at the CLI layer instead: `cli/main.py::main()` wraps command
+  dispatch in a single top-level `try/except Exception`, turning this
+  (and any other unhandled error) into exit `4` with a JSON-safe message
+  rather than a raw traceback -
+  `tests/test_cli_main.py::test_missing_ffprobe_is_caught_by_the_top_level_handler_not_a_traceback`
+  proves this against the real gap (a monkeypatched `subprocess.run` that
+  raises `FileNotFoundError("ffprobe")` mid-render, after the real FFmpeg
+  calls elsewhere in the same render have already succeeded), not a
+  synthetic stand-in. A direct Python caller of `render_preview_and_report()`/
+  `render_final_and_report()` (bypassing the CLI) still gets the raw
+  exception, uncaught - this gap is genuinely open, just no longer able to
+  crash the one entry point Phase 11 added.
 
 - ~~`render/pipeline.py::_render()`'s final `mux_and_encode()` call writes
   directly to the caller-supplied real output path, not a temp path -
@@ -451,8 +609,9 @@ go through this session's GitHub-web-UI text-paste upload workflow.
   `tempfile.TemporaryDirectory()`'s actual Windows path shape end to end
   through the full render pipeline; `shutil.which("ffmpeg")` against real
   Windows `PATHEXT`/`.exe` resolution; and Windows console
-  (cmd.exe/PowerShell) encoding behavior for Korean text output once a
-  CLI exists (Phase 11). None of this should be described as "Windows
+  (cmd.exe/PowerShell) encoding behavior for Korean text output through
+  the `seoulkit-studio` CLI, which exists now (Phase 11) but has likewise
+  only been run on Linux. None of this should be described as "Windows
   supported" until a real Windows run confirms it.
 
 - `render/subtitle.py::generate_ass()` sets `PlayResX`/`PlayResY` to
