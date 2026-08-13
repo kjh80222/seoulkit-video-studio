@@ -60,11 +60,61 @@ pure additive exposure of the `evaluate_plan()` call already made above -
 Report (ch. 17) needs these values on every attempt, including a gated
 one, so they're populated at every `RenderResult(...)` return point in
 this function, not just the successful path.
+
+Publish hotfix (post-Phase 10): every output file - the muxed video, and
+for Final also `.ass`/`.srt` - now stays inside `_render()`'s own
+`TemporaryDirectory()` until the very end, and is only committed to its
+real destination after everything, including the copy itself, has
+succeeded. This closes a real defect found while planning Phase 10:
+`mux_and_encode()` used to write straight to the caller's real
+`output_path`, and `.ass`/`.srt` used to be written to their real
+destinations right after the overlay stage - long before the pipeline as
+a whole was known to succeed. Both were empirically reproduced before this
+fix: a corrupted voice file made a real `render_final()` call fail at the
+audio-mix stage while still leaving valid `.ass`/`.srt` content at the
+real `output/` paths; a deliberately-killed real FFmpeg encode left a
+genuine partial `.mp4` at its real destination.
+
+Publish is a best-effort two-phase commit, not a true filesystem
+transaction. `os.replace()` is atomic for one file on one filesystem, but
+three independent files (mp4/ass/srt) can't be committed as a single unit
+with only POSIX rename semantics:
+
+  Phase 1 (`_stage_copies`): copy every staged file to a uniquely-named
+  (`uuid4`-suffixed, to avoid colliding with a stale leftover from a
+  crashed prior attempt) temp file beside its real destination. Nothing
+  real is touched yet. If any copy fails, every temp file already created
+  is removed and nothing is committed.
+
+  Phase 2 (`_commit_all`): only entered once every copy in phase 1
+  succeeded. For each file in order: back up the existing destination (if
+  any) via `os.replace()`, then `os.replace()` the temp file into place.
+  If a later file's commit fails, every already-committed file in this
+  attempt is rolled back in reverse order. Rollback is also just
+  `os.replace()` calls and is expected to succeed in practice, but it is
+  not guaranteed to - if a rollback's own `os.replace()` fails too, that
+  is reported as `publish_rollback_failed`, distinct from an ordinary
+  `publish_commit_failed`, and never silently absorbed. The output
+  directory may be left inconsistent in that (rare, OS/filesystem-level)
+  case, and the report says so rather than claiming a clean recovery it
+  didn't actually achieve.
+
+Publish failure is a real execution failure, not a gate rejection - it is
+recorded as a `PublishResult` (same `command`/`stdout`/`stderr`/`error`/
+`ok` shape as every other `StageResult`) appended to `stage_results`, so
+Phase 10's `render/report.py::_errors_from_stage_results()` already picks
+it up into the Render Report's `errors[]` with zero changes needed in
+that module - `report.py` only gained two small cosmetic dict entries
+(`_STAGE_NAMES`/`_ERROR_MESSAGES`) for a friendlier `stage`/`message`,
+nothing contract-shaped.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Union
@@ -94,7 +144,26 @@ PREVIEW_WATERMARK_TEXT = "PREVIEW"
 FINAL_RESOLUTION = "1080x1920"
 FINAL_CRF = 18
 
-StageResult = Union[TrimResult, HoldResult, ConcatResult, OverlayResult, BurnInResult, AudioMixResult, EncodeResult]
+PublishErrorKind = Literal["publish_copy_failed", "publish_commit_failed", "publish_rollback_failed"]
+
+
+@dataclass
+class PublishResult:
+    output_path: Path | None
+    command: list[str] = field(default_factory=list)
+    returncode: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    error: PublishErrorKind | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+
+StageResult = Union[
+    TrimResult, HoldResult, ConcatResult, OverlayResult, BurnInResult, AudioMixResult, EncodeResult, PublishResult
+]
 GateError = Literal["not_ready", "review_required"]
 
 
@@ -142,6 +211,105 @@ def _run_clip_stage(
             clip_paths.append(trimmed_path)
 
     return clip_paths, stage_results
+
+
+@dataclass
+class _Publishable:
+    staged_path: Path
+    dest_path: Path
+    tmp_path: Path | None = None
+    backup_path: Path | None = None
+    had_existing_dest: bool = False
+
+
+def _unique_sibling(dest_path: Path, tag: str) -> Path:
+    return dest_path.with_name(f".{dest_path.name}.{uuid.uuid4().hex}.{tag}")
+
+
+def _stage_copies(publishables: list[_Publishable]) -> str | None:
+    """Phase 1: copy each staged file to a unique temp path beside its real
+    destination. Returns None on full success, or an error message if any
+    copy failed - in which case every temp file already created is removed
+    and no real destination has been touched at all."""
+    for p in publishables:
+        p.tmp_path = _unique_sibling(p.dest_path, "tmp")
+        try:
+            shutil.copy2(p.staged_path, p.tmp_path)
+        except OSError as exc:
+            for done in publishables:
+                if done.tmp_path is not None and done.tmp_path.exists():
+                    done.tmp_path.unlink(missing_ok=True)
+            return f"failed to stage {p.dest_path.name}: {exc}"
+    return None
+
+
+def _rollback(committed: list[_Publishable]) -> str | None:
+    errors = []
+    for p in reversed(committed):
+        try:
+            if p.had_existing_dest and p.backup_path is not None:
+                os.replace(p.backup_path, p.dest_path)
+            else:
+                p.dest_path.unlink(missing_ok=True)
+        except OSError as exc:
+            errors.append(f"{p.dest_path.name}: {exc}")
+    return "; ".join(errors) if errors else None
+
+
+def _cleanup(publishables: list[_Publishable]) -> None:
+    for p in publishables:
+        if p.tmp_path is not None and p.tmp_path.exists():
+            p.tmp_path.unlink(missing_ok=True)
+        if p.backup_path is not None and p.backup_path.exists():
+            p.backup_path.unlink(missing_ok=True)
+
+
+def _commit_all(publishables: list[_Publishable]) -> tuple[PublishErrorKind | None, str]:
+    """Phase 2: back up + replace each destination in turn, only ever
+    called once every phase-1 copy has already succeeded. On failure,
+    rolls back everything already committed in this attempt, in reverse
+    order, then cleans up temp/backup files either way. Returns
+    (None, "") on full success. A rollback failure is reported as
+    publish_rollback_failed and never silently absorbed - the output
+    directory may be left inconsistent in that case, and that is what
+    gets reported, not a false "recovered cleanly."
+
+    A failure can land in the middle of a single publishable's own two-step
+    commit (dest backed up, but tmp -> dest not yet done) - that file's
+    original is safely sitting in `backup_path` but the file was never
+    appended to `committed` (only a fully-completed commit is). Restoring
+    it therefore needs `failed_on` added to the restore set whenever its
+    backup already succeeded (`had_existing_dest`); when the backup step
+    itself is what failed, `had_existing_dest` is still False and the
+    original destination was never touched, so nothing needs restoring
+    there."""
+    committed: list[_Publishable] = []
+    try:
+        for p in publishables:
+            if p.dest_path.exists():
+                p.backup_path = _unique_sibling(p.dest_path, "bak")
+                os.replace(p.dest_path, p.backup_path)
+                p.had_existing_dest = True
+            os.replace(p.tmp_path, p.dest_path)
+            committed.append(p)
+    except OSError as exc:
+        failed_on = publishables[len(committed)]
+        to_restore = committed if not failed_on.had_existing_dest else committed + [failed_on]
+        rollback_error = _rollback(to_restore)
+        _cleanup(publishables)
+        if rollback_error:
+            return "publish_rollback_failed", (
+                f"commit failed on {failed_on.dest_path.name}: {exc}; rollback of "
+                f"{len(committed)} already-committed file(s) also failed: {rollback_error} "
+                "- output directory may be inconsistent, manual check needed"
+            )
+        return "publish_commit_failed", (
+            f"commit failed on {failed_on.dest_path.name}: {exc}; rolled back "
+            f"{len(committed)} already-committed file(s) successfully"
+        )
+
+    _cleanup(publishables)
+    return None, ""
 
 
 def _render(
@@ -203,7 +371,11 @@ def _render(
             return RenderResult(ok=False, output_path=None, stage_results=stage_results, **_evaluation_fields())
 
         width, height = probe_video_resolution(overlay_result.output_path)
-        ass_path = ass_output_path if want_ass_srt else work_dir / "subs.ass"
+        # Always staged in work_dir, even for Final - never the real
+        # ass_output_path directly. See module docstring: this used to
+        # write straight to the real destination here, before the
+        # pipeline's success was known.
+        ass_path = work_dir / "subs.ass"
         ass_path.write_text(generate_ass(data.get("subtitles", []), width, height))
 
         subtitle_result = burn_subtitles(overlay_result.output_path, ass_path, work_dir / "subtitled.mp4")
@@ -212,14 +384,14 @@ def _render(
             return RenderResult(
                 ok=False,
                 output_path=None,
-                ass_path=ass_path if want_ass_srt else None,
+                ass_path=None,
                 stage_results=stage_results,
                 **_evaluation_fields(),
             )
 
         srt_path: Path | None = None
         if want_ass_srt:
-            srt_path = srt_output_path
+            srt_path = work_dir / "subs.srt"  # staged, not srt_output_path directly - see above
             srt_path.write_text(generate_srt(data.get("subtitles", [])))
 
         audio_result = mix_audio(project_dir, data["voice"], data["segments"], data["audio_layers"], work_dir / "audio.wav")
@@ -228,16 +400,17 @@ def _render(
             return RenderResult(
                 ok=False,
                 output_path=None,
-                ass_path=ass_path if want_ass_srt else None,
-                srt_path=srt_path,
+                ass_path=None,
+                srt_path=None,
                 stage_results=stage_results,
                 **_evaluation_fields(),
             )
 
+        encoded_staging_path = work_dir / "encoded.mp4"
         encode_result = mux_and_encode(
             subtitle_result.output_path,
             audio_result.output_path,
-            output_path,
+            encoded_staging_path,
             resolution=resolution,
             crf=crf,
             watermark_text=watermark_text,
@@ -247,17 +420,51 @@ def _render(
             return RenderResult(
                 ok=False,
                 output_path=None,
-                ass_path=ass_path if want_ass_srt else None,
-                srt_path=srt_path,
+                ass_path=None,
+                srt_path=None,
                 stage_results=stage_results,
                 **_evaluation_fields(),
             )
 
+        # --- publish: everything succeeded so far, only now touch the real destinations ---
+        publishables = [_Publishable(staged_path=encoded_staging_path, dest_path=output_path)]
+        if want_ass_srt:
+            publishables.append(_Publishable(staged_path=ass_path, dest_path=ass_output_path))
+            publishables.append(_Publishable(staged_path=srt_path, dest_path=srt_output_path))
+
+        copy_error = _stage_copies(publishables)
+        if copy_error is not None:
+            stage_results.append(PublishResult(output_path=None, error="publish_copy_failed", stderr=copy_error))
+            return RenderResult(
+                ok=False,
+                output_path=None,
+                ass_path=None,
+                srt_path=None,
+                stage_results=stage_results,
+                **_evaluation_fields(),
+            )
+
+        commit_error_kind, commit_error_message = _commit_all(publishables)
+        if commit_error_kind is not None:
+            stage_results.append(
+                PublishResult(output_path=None, error=commit_error_kind, stderr=commit_error_message)
+            )
+            return RenderResult(
+                ok=False,
+                output_path=None,
+                ass_path=None,
+                srt_path=None,
+                stage_results=stage_results,
+                **_evaluation_fields(),
+            )
+
+        stage_results.append(PublishResult(output_path=output_path))
+
     return RenderResult(
         ok=True,
         output_path=output_path,
-        ass_path=ass_path if want_ass_srt else None,
-        srt_path=srt_path,
+        ass_path=ass_output_path if want_ass_srt else None,
+        srt_path=srt_output_path if want_ass_srt else None,
         stage_results=stage_results,
         **_evaluation_fields(),
     )
