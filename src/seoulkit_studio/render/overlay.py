@@ -62,6 +62,22 @@ overlay whose font can't be resolved (there is no filter string that could
 work without a real `fontfile=` path), and `burn_overlays()` refuses to
 even invoke FFmpeg if any font issues were recorded, returning them on the
 `OverlayResult` instead of producing a video silently missing overlays.
+
+Windows path escaping: `resolution.file_path` used to go straight into the
+`fontfile=` value unescaped, with no guard at all. Empirically this turned
+out to be a *silent* failure mode, not a crash: unlike the `ass` filter
+(where a colon derails the filename token and FFmpeg refuses to run at
+all, `subtitle.py`'s original failure mode), `drawtext`'s `fontfile=`
+value simply truncates at the first unescaped colon and FFmpeg still
+exits 0 - it falls back to some other font entirely rather than erroring,
+confirmed by rendering visibly non-bold text from a request for the bold
+weight. That is the same class of silent-substitution bug the bundled-font
+work elsewhere in this module exists to prevent, just reached through a
+different mechanism (filtergraph misparsing instead of fontconfig
+fallback) - arguably worse than a loud failure, since nothing here would
+have told a Windows user their overlays were rendering in the wrong font.
+Now routed through `render.filter_escape.escape_filter_path()`, the same
+empirically-verified helper `subtitle.py` uses for `ass=`/`fontsdir=`.
 """
 
 from __future__ import annotations
@@ -73,6 +89,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from seoulkit_studio.preflight import Severity
+from seoulkit_studio.render.filter_escape import escape_filter_path
 from seoulkit_studio.render.fonts import BundledFontError, resolve_bundled_font
 from seoulkit_studio.render.subtitle import probe_video_resolution
 from seoulkit_studio.render.time_format import ms_to_seconds_str
@@ -171,7 +188,7 @@ def build_overlay_filter(
         text = _escape_drawtext_text(overlay["text"])
 
         filters.append(
-            f"drawtext=fontfile={resolution.file_path}:text='{text}':"
+            f"drawtext=fontfile={escape_filter_path(resolution.file_path)}:text='{text}':"
             f"x={x_expr}:y={anchor_y}:fontsize={font_preset['size']}:"
             f"fontcolor=white:bordercolor=black:borderw=3:"
             f"enable='between(t,{start_s},{end_s})'"
