@@ -66,6 +66,32 @@ def validate_schema(data: dict[str, Any]) -> list[Issue]:
     return issues
 
 
+def segment_expected_duration_ms(segment: dict[str, Any]) -> int | None:
+    """The Duration Invariant's expected segment_duration_ms, derived purely
+    from the segment's own clip_in_ms/clip_out_ms/hold_strategy/hold_ms
+    fields - extracted so callers other than validate_duration_invariant()
+    (e.g. a post-render aggregate QC check comparing this sum against a real
+    ffprobe-measured render, added in Phase 10 - see render/report.py) can
+    reuse the exact same formula instead of re-deriving it independently.
+    Returns None if a required field is missing or hold_strategy isn't a
+    recognized value - both cases the caller can treat as "already reported
+    by schema validation," same as validate_duration_invariant() does.
+    """
+    try:
+        source_used_ms = segment["clip_out_ms"] - segment["clip_in_ms"]
+        hold_strategy = segment["hold_strategy"]
+        hold_ms = segment["hold_ms"]
+    except KeyError:
+        return None
+
+    if hold_strategy in ("none", "source_hold"):
+        return source_used_ms
+    elif hold_strategy == "settle_frame_hold":
+        return source_used_ms + hold_ms
+    else:
+        return None
+
+
 def validate_duration_invariant(
     data: dict[str, Any], tolerance_ms: int = DEFAULT_DURATION_TOLERANCE_MS
 ) -> list[Issue]:
@@ -75,18 +101,15 @@ def validate_duration_invariant(
         try:
             segment_duration_ms = segment["end_ms"] - segment["start_ms"]
             source_used_ms = segment["clip_out_ms"] - segment["clip_in_ms"]
-            hold_strategy = segment["hold_strategy"]
             hold_ms = segment["hold_ms"]
         except KeyError:
             # Missing fields are already reported by schema validation.
             continue
 
-        if hold_strategy in ("none", "source_hold"):
-            expected_ms = source_used_ms
-        elif hold_strategy == "settle_frame_hold":
-            expected_ms = source_used_ms + hold_ms
-        else:
-            # Invalid hold_strategy value is already reported by schema validation.
+        expected_ms = segment_expected_duration_ms(segment)
+        if expected_ms is None:
+            # Missing fields or an invalid hold_strategy value - already
+            # reported by schema validation.
             continue
 
         diff_ms = abs(segment_duration_ms - expected_ms)
