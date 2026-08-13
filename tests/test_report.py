@@ -2,6 +2,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,36 @@ def test_preview_success_report_lands_in_preview_dir(demo_project, probe_duratio
     assert on_disk["output_file"] == "preview/preview_v001.mp4"
 
 
+@requires_ffmpeg
+def test_result_report_path_and_log_path_match_the_real_files_on_success(demo_project, probe_duration_ms):
+    plan_path = write_plan(demo_project, base_plan(status="READY", warnings=[]))
+
+    result, report = render_preview_and_report(plan_path, demo_project)
+
+    assert result.report_path == demo_project / "preview" / "preview_v001.render_report.json"
+    assert result.log_path == demo_project / "logs" / "render_v001.log"
+    assert result.report_path.exists()
+    assert result.log_path.exists()
+
+
+@requires_ffmpeg
+def test_persisted_render_report_json_never_gains_report_path_or_log_path(demo_project):
+    # Phase 11 exposes report_path/log_path additively on RenderResult only
+    # (see render/pipeline.py's module docstring) - the persisted ch. 17
+    # Render Report JSON, built from RenderReport via asdict(), must stay
+    # exactly the schema it was before Phase 11. This is the automated
+    # version of a check that was previously only done by hand.
+    plan_path = write_plan(demo_project, base_plan(status="READY", warnings=[]))
+
+    result, report = render_preview_and_report(plan_path, demo_project)
+
+    assert "report_path" not in asdict(report)
+    assert "log_path" not in asdict(report)
+    on_disk = json.loads(result.report_path.read_text())
+    assert "report_path" not in on_disk
+    assert "log_path" not in on_disk
+
+
 # --- successful Final report --------------------------------------------------
 
 
@@ -202,6 +233,9 @@ def test_final_gate_rejection_report_lands_in_logs(demo_project):
     assert report.errors == []  # gate rejection is not an execution failure
     assert any(issue.code == "SOME_WARNING" for issue in report.preflight_issues)
     assert report.qc_results == []
+
+    assert result.report_path == report_path
+    assert result.log_path == demo_project / "logs" / "render_v001.log"
 
 
 # --- real stage failure: gate lets it through, FFmpeg then fails -----------
