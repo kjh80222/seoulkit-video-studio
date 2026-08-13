@@ -140,6 +140,28 @@ def test_build_overlay_filter_reports_no_font_issues_when_bundle_is_intact():
     assert issues == []
 
 
+def test_build_overlay_filter_escapes_a_colon_in_the_font_path(monkeypatch):
+    # Deterministic, FFmpeg-free companion to the real-execution colon test
+    # below: asserts the exact escaped substring is present in the
+    # generated filter string. Needed because FFmpeg's own leniency here
+    # (drawtext silently falls back to a different font on an unescaped
+    # colon rather than erroring - see overlay.py's module docstring) means
+    # "the render still succeeds" does not, by itself, prove the escaping
+    # actually happened.
+    from seoulkit_studio.render.overlay import FontResolution
+
+    monkeypatch.setattr(
+        "seoulkit_studio.render.overlay.resolve_font_file",
+        lambda weight: FontResolution(weight=weight, file_path="C:\\Users\\foo\\NotoSansKR-Bold.ttf"),
+    )
+
+    filter_str, _, _ = build_overlay_filter([one_overlay(type="giant_number")], 1000, 1000)
+
+    assert "fontfile=C" + "\\" * 2 + ":/Users/foo/NotoSansKR-Bold.ttf" in filter_str
+    # And, just as importantly, the raw unescaped path must NOT appear.
+    assert "fontfile=C:\\Users" not in filter_str
+
+
 def test_build_overlay_filter_records_a_font_substitution_issue_when_bundle_is_broken(monkeypatch):
     def fake_resolve(weight):
         raise BundledFontError(f"simulated missing bundled font ({weight})")
@@ -274,4 +296,38 @@ def test_ffmpeg_failure_on_missing_video_is_captured_not_raised(tmp_path):
     assert not result.ok
     assert result.error == "ffmpeg_failed"
     assert result.returncode != 0
-    assert result.stderr != ""
+
+
+@requires_ffmpeg
+def test_colon_in_font_path_is_escaped_and_overlay_still_burns_in(
+    tmp_path, make_solid_color_video, frame_region_stddev, monkeypatch
+):
+    # Regression test for the Windows path-escaping hotfix, real FFmpeg
+    # execution. fontfile= used to go straight into the filtergraph
+    # unescaped, with no guard at all - an unescaped colon there doesn't
+    # crash FFmpeg (confirmed empirically), it silently truncates the value
+    # and falls back to a different font, so a stddev/visual check alone
+    # can't distinguish old-buggy from new-correct behavior here; the
+    # command-string assertion below is what actually proves the escaping
+    # happened. A colon is a legal POSIX filename character, so the real
+    # bundled font is copied into a colon-named directory to reproduce the
+    # same class of path FONT_DIR always has on Windows.
+    from seoulkit_studio.render.fonts import FONT_DIR
+    from seoulkit_studio.render.overlay import FontResolution
+
+    colon_dir = tmp_path / "fake:windows-style-dir"
+    colon_dir.mkdir()
+    colon_font_path = colon_dir / "NotoSansKR-Bold.ttf"
+    shutil.copy2(FONT_DIR / "NotoSansKR-Bold.ttf", colon_font_path)
+    monkeypatch.setattr(
+        "seoulkit_studio.render.overlay.resolve_font_file",
+        lambda weight: FontResolution(weight=weight, file_path=str(colon_font_path)),
+    )
+
+    video = make_solid_color_video(tmp_path / "bg.mp4", duration_ms=1000, color="navy", size="320x240")
+    result = burn_overlays(video, [one_overlay(text="1953", end_ms=1000)], tmp_path / "out.mp4")
+
+    assert result.ok, result.stderr
+    assert "fontfile=" + str(colon_font_path).replace(":", "\\" * 2 + ":") in " ".join(result.command)
+    top_right_stddev = frame_region_stddev(result.output_path, at_ms=500, crop="iw/2:ih/2:iw/2:0")
+    assert top_right_stddev > 10.0  # overlay text actually drawn, not silently skipped
