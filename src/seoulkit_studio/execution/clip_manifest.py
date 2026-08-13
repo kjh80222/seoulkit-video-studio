@@ -16,6 +16,37 @@ truthful, which Phase 1 has no way to know on its own.
 Read-only, like everything else in this pipeline: `clip_manifest.json` is
 never opened for writing, matching edit_plan.json's own immutability
 guarantee (ch. 06).
+
+`check_sfx_contract_resolution()` (added after Phase 9) closes a gap left
+open since Phase 8: `preflight/validator.py::check_declared_warnings()`
+can only see an SFX candidate Stage 4 *did* write a `warnings[]` entry
+for - if Stage 4 silently drops a candidate (adds it to neither
+`sfx_source.clips[]` nor `warnings[]`), nothing in `edit_plan.json` alone
+carries any trace that a candidate ever existed. Closing that requires an
+independent record of which shots actually had a candidate - the same
+"Stage 3 writes, Stage 5 reads-and-verifies" shape this module already
+uses for usable-range fields, now extended to
+`clip_manifest.json[].optional_source_audio`.
+
+This is opt-in, via a top-level `sfx_contract_version` key on
+clip_manifest.json itself. Its absence means "this manifest predates the
+SFX contract, or its writer hasn't adopted it yet" - not "there are no
+candidates" - so a legacy manifest is skipped by this check entirely,
+the same way a missing/unreadable manifest already short-circuits before
+any per-shot logic runs (this check deliberately does not re-report
+`CLIP_MANIFEST_MISSING`/`CLIP_MANIFEST_UNREADABLE` itself -
+`check_clip_manifest_consistency()` already owns those). Declaring
+`sfx_contract_version` is a promise: every clip entry must carry
+`optional_source_audio` from that point on, so a shot missing that field
+once the version is declared is a broken promise
+(`SFX_CONTRACT_FIELD_MISSING`, blocking - the same severity as
+`CLIP_MANIFEST_SHOT_MISSING`, since both mean "this shot cannot be
+verified at all"), not a soft "still deciding" signal. An
+`optional_source_audio.available: true` shot that never shows up in
+`edit_plan.json`'s `sfx_source.clips[]` is `SFX_UNRESOLVED_CANDIDATE`
+(warning - matches Stage 5 spec ch. 04-6's own example of this code) -
+that means Stage 4 hasn't finished yet, not that Stage 3's writer is
+broken.
 """
 
 from __future__ import annotations
@@ -24,85 +55,4 @@ import json
 from pathlib import Path
 from typing import Any
 
-from seoulkit_studio.preflight import PreflightIssue
-
-_COMPARED_FIELDS = ("usable_start_ms", "usable_end_ms", "key_event_end_ms", "settle_start_ms")
-
-
-def check_clip_manifest_consistency(data: dict[str, Any], clip_manifest_path: Path) -> list[PreflightIssue]:
-    if not clip_manifest_path.is_file():
-        return [
-            PreflightIssue(
-                "CLIP_MANIFEST_MISSING",
-                "warning",
-                f"{clip_manifest_path} not found - Stage 3 may not have run yet",
-            )
-        ]
-
-    try:
-        manifest = json.loads(clip_manifest_path.read_text())
-    except json.JSONDecodeError as exc:
-        return [PreflightIssue("CLIP_MANIFEST_UNREADABLE", "blocking", f"{clip_manifest_path}: {exc}")]
-
-    clips = manifest.get("clips", [])
-
-    # Detect duplicate shot entries BEFORE building the lookup table below.
-    # A dict comprehension over clips[] would let the last entry for a
-    # given shot silently win, with no trace that an earlier - possibly
-    # authoritative - entry ever existed. Counting occurrences up front
-    # makes the ambiguity explicit instead of hiding it inside dict
-    # construction.
-    shot_counts: dict[str, int] = {}
-    for clip in clips:
-        if "shot" in clip:
-            shot_counts[clip["shot"]] = shot_counts.get(clip["shot"], 0) + 1
-    duplicate_shots = {shot for shot, count in shot_counts.items() if count > 1}
-
-    issues: list[PreflightIssue] = [
-        PreflightIssue(
-            "CLIP_MANIFEST_DUPLICATE_SHOT",
-            "blocking",
-            f"shot {shot!r} appears {shot_counts[shot]} times in {clip_manifest_path} "
-            "- which entry is authoritative is ambiguous",
-        )
-        for shot in sorted(duplicate_shots)
-    ]
-
-    manifest_by_shot: dict[str, dict[str, Any]] = {clip["shot"]: clip for clip in clips if "shot" in clip}
-
-    for segment in data.get("segments", []):
-        shot = segment.get("shot")
-        ref = f"beat={segment.get('beat')} shot={shot}"
-
-        if shot in duplicate_shots:
-            # Already reported above. Comparing against whichever entry
-            # happened to win the dict build would only add a misleading
-            # match/mismatch verdict on top of an already-ambiguous manifest.
-            continue
-
-        manifest_entry = manifest_by_shot.get(shot)
-        if manifest_entry is None:
-            issues.append(
-                PreflightIssue(
-                    "CLIP_MANIFEST_SHOT_MISSING",
-                    "blocking",
-                    f"shot {shot!r} not recorded in {clip_manifest_path}",
-                    ref,
-                )
-            )
-            continue
-
-        for field in _COMPARED_FIELDS:
-            plan_value = segment.get(field)
-            manifest_value = manifest_entry.get(field)
-            if plan_value != manifest_value:
-                issues.append(
-                    PreflightIssue(
-                        "CLIP_MANIFEST_MISMATCH",
-                        "blocking",
-                        f"{field}: edit_plan.json has {plan_value!r}, clip_manifest.json has {manifest_value!r}",
-                        ref,
-                    )
-                )
-
-    return issues
+from seoulkit_studio.preflight import Preflig
