@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from seoulkit_studio.render.encode import EncodeResult
 from seoulkit_studio.render.pipeline import render_final, render_preview
 
 requires_ffmpeg = pytest.mark.skipif(
@@ -299,10 +300,12 @@ def test_preview_has_a_watermark_and_final_does_not(demo_project, frame_region_s
     final_result = render_final(plan_path, demo_project, final_output, demo_project / "f.ass", demo_project / "f.srt")
     assert final_result.ok, [getattr(sr, "stderr", "") for sr in final_result.stage_results if not sr.ok]
 
-    # The last stage in both pipelines is always the encode step - check its
-    # command directly rather than searching every stage.
-    assert "drawtext" in " ".join(preview_result.stage_results[-1].command)
-    assert "drawtext" not in " ".join(final_result.stage_results[-1].command)
+    # Find the encode stage explicitly rather than assuming position - the
+    # publish step (hotfix, post-Phase 10) now appends a PublishResult after it.
+    preview_encode = next(sr for sr in preview_result.stage_results if isinstance(sr, EncodeResult))
+    final_encode = next(sr for sr in final_result.stage_results if isinstance(sr, EncodeResult))
+    assert "drawtext" in " ".join(preview_encode.command)
+    assert "drawtext" not in " ".join(final_encode.command)
 
 
 @requires_ffmpeg
