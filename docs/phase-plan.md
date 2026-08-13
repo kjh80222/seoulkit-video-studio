@@ -25,17 +25,19 @@ including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
 including `render/time_format.py`, `render/trim.py`, `render/concat.py`,
 `render/hold.py`, `render/subtitle.py`, `render/fonts.py`,
 `render/overlay.py`, `render/audio_mix.py`, `render/encode.py`,
-`render/pipeline.py`, and `render/report.py`; 325/325 tests passing as of
+`render/pipeline.py`, and `render/report.py`; 335/335 tests passing as of
 this update, with the ffmpeg/ffprobe-requiring subset auto-skipping when
 those tools are absent). Phase 11 onward is not started and should not be
 assumed to work - do not reimplement Phase 0/1/2/2.5/3/4/5/6/7/8/9/10 in a
 new session; extend from here.
 
 **Phase 11 is explicitly not started, on the user's direct instruction.**
-Before it begins, a separate Phase 9 hotfix is planned (see Known gaps:
-`mux_and_encode()` can leave a partial file at the real output path on a
-mid-encode failure) - that hotfix, plus a full regression run, comes
-between Phase 10 and Phase 11, not folded into either.
+The Phase 9 partial-output hotfix planned after Phase 10 (see Known gaps:
+`mux_and_encode()`/`.ass`/`.srt` could leave partial or stale output at the
+real destination on failure) is now done - `render/pipeline.py` publishes
+every output file only after a best-effort two-phase commit, with full
+regression passing (335/335). One more end-to-end check is planned before
+Phase 11 itself starts.
 
 Phase 10 (`render/report.py`) implements the Stage 5 spec ch. 17 Render
 Report and owns version-numbered output path assignment
@@ -130,25 +132,82 @@ go through this session's GitHub-web-UI text-paste upload workflow.
 
 ## Known gaps
 
-- **`render/pipeline.py::_render()`'s final `mux_and_encode()` call writes
+- ~~`render/pipeline.py::_render()`'s final `mux_and_encode()` call writes
   directly to the caller-supplied real output path, not a temp path -
-  found during Phase 10 planning, not fixed there.** Every stage before
-  the last one writes into `_render()`'s own `tempfile.TemporaryDirectory()`;
-  the very last FFmpeg call (mux + resolution/CRF encode) is the one
-  exception, since its `output_path` argument is whatever
-  `render/report.py` (or any caller) decided the real final destination
-  is. If that specific FFmpeg invocation fails partway through, FFmpeg can
-  leave a partial or corrupt file sitting at that real path - directly
-  contradicting ch. 17/23's "부분 산출물은 output/ 에 두지 않는다"
-  principle. Deliberately **not fixed in Phase 10**: doing so from inside
-  the new Render Report module would quietly patch a Phase 9 defect
-  without it ever being visible as one, and Phase 9 is supposed to be
-  frozen, already-approved code. `render/report.py` correctly writes
-  `output_file: null` in this case regardless of whether a stray file
-  exists on disk - the report doesn't claim success it didn't have. A
-  dedicated Phase 9 hotfix (have `mux_and_encode()` target a temp path and
-  only move it into place on success) is planned before Phase 11 starts,
-  followed by a full regression run.
+  found during Phase 10 planning, not fixed there.~~ **Resolved by the
+  post-Phase 10 Phase 9 hotfix.** The same investigation also found a
+  second instance of the same defect that Phase 10 planning hadn't caught:
+  Final's `.ass`/`.srt` were being written straight to their real
+  destinations right after the overlay stage, long before the pipeline as
+  a whole was known to succeed - reproduced empirically with a real
+  `render_final()` call against a project with a corrupted (present but
+  undecodable) voice file, which passes the `MISSING_VOICE_ASSET`
+  `.is_file()` check but makes `mix_audio()`'s real FFmpeg call fail; the
+  `.ass`/`.srt` still landed at their real `output/` paths despite the
+  overall render failing. A deliberately-killed real FFmpeg encode
+  separately confirmed the original `mux_and_encode()` report: a genuine
+  partial `.mp4` at the real destination.
+
+  Fix: every output file (mp4, and for Final also `.ass`/`.srt`) now stays
+  inside `_render()`'s own `TemporaryDirectory()` until everything else has
+  already succeeded, and is only published afterward via a best-effort
+  two-phase commit (`_stage_copies()`/`_commit_all()` in
+  `render/pipeline.py`) - explicitly not framed as a true filesystem
+  transaction, since `os.replace()` is only atomic for one file on one
+  filesystem, not for the mp4/ass/srt set as a unit:
+    - Phase 1 copies every staged file to a `uuid4`-suffixed temp path
+      beside its real destination (chosen unique, not fixed, so a stale
+      leftover from a crashed prior run or a concurrent retry can't
+      collide with it). If any copy fails, every temp file already created
+      is removed and no real destination is touched.
+    - Phase 2 backs up each existing destination (same `uuid4`-suffixed
+      scheme) and `os.replace()`s the temp file into place, one file at a
+      time. If a later file's commit fails, every already-committed file
+      in this attempt is rolled back in reverse order. If a rollback's own
+      `os.replace()` fails too, that is reported as a distinct
+      `publish_rollback_failed` (vs. an ordinary `publish_commit_failed`)
+      and never silently absorbed - the report says the output directory
+      may be inconsistent rather than claiming a clean recovery it didn't
+      achieve.
+  A real bug was caught by this hotfix's own new tests before it ever
+  reached GitHub: the first version of `_commit_all()` only rolled back
+  files that had *fully* completed their two-step commit (backup, then
+  replace) - a failure landing on the second step, right after that same
+  file's own backup had already succeeded, was not rolled back at all,
+  because that file was never added to the "committed" list. `_cleanup()`
+  then deleted its now-orphaned backup unconditionally, permanently losing
+  the original content and leaving the destination missing entirely.
+  `tests/test_publish_safety.py::test_commit_failure_restores_existing_destination_byte_identical_no_bak_leftover`
+  reproduced this red against the buggy version (`FileNotFoundError` on the
+  destination) before the fix (include that in-flight file in the restore
+  set whenever its own backup step already succeeded) made it green.
+
+  Publish failure is surfaced as a real execution failure, not hidden
+  behind an otherwise-all-success `stage_results`: a new `PublishResult`
+  (same `command`/`stdout`/`stderr`/`error`/`ok` shape as every other
+  stage result) is appended to `RenderResult.stage_results`, so
+  `render/report.py::_errors_from_stage_results()` already picks it up
+  into the Render Report's `errors[]` with `stage="publish_outputs"` and
+  one of `publish_copy_failed`/`publish_commit_failed`/
+  `publish_rollback_failed` as `code` - confirmed via
+  `test_publish_copy_failure_appears_in_render_report_errors_with_publish_stage`,
+  which calls `render_final_and_report()` end to end. `render/report.py`
+  itself only gained two small cosmetic dict entries
+  (`_STAGE_NAMES["PublishResult"]`, three `_ERROR_MESSAGES` entries) -
+  nothing in its actual logic changed.
+
+  10 new tests in `tests/test_publish_safety.py` (low-level tests against
+  `_stage_copies()`/`_commit_all()`/`_rollback()` directly, plus real-FFmpeg
+  end-to-end tests through `render_final()`/`render_preview()`/
+  `render_final_and_report()`), plus a fix to
+  `tests/test_pipeline.py::test_preview_has_a_watermark_and_final_does_not`
+  (it assumed the encode stage was always `stage_results[-1]`, no longer
+  true now that publish appends after it). 335/335 passing, fresh clone
+  verified. Red/green also performed at the level of the original defect
+  itself: the new end-to-end tests were run against the pre-hotfix
+  `render/pipeline.py` and failed exactly as expected (`f.ass` found to
+  exist at its real destination after a real failed `render_final()`
+  call), then passed once the fixed version was restored.
 
 - **A true per-segment `duration_invariant_post_render` QC check is not
   implemented - only an aggregate-level one.** `render/pipeline.py::_render()`
