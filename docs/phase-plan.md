@@ -25,19 +25,24 @@ including `execution/clip_manifest.py`, `src/seoulkit_studio/render/`
 including `render/time_format.py`, `render/trim.py`, `render/concat.py`,
 `render/hold.py`, `render/subtitle.py`, `render/fonts.py`,
 `render/overlay.py`, `render/audio_mix.py`, `render/encode.py`,
-`render/pipeline.py`, and `render/report.py`; 335/335 tests passing as of
-this update, with the ffmpeg/ffprobe-requiring subset auto-skipping when
-those tools are absent). Phase 11 onward is not started and should not be
-assumed to work - do not reimplement Phase 0/1/2/2.5/3/4/5/6/7/8/9/10 in a
-new session; extend from here.
+`render/pipeline.py`, `render/report.py`, and `render/filter_escape.py`;
+344/344 tests passing as of this update, with the ffmpeg/ffprobe-requiring
+subset auto-skipping when those tools are absent). Phase 11 onward is not
+started and should not be assumed to work - do not reimplement Phase
+0/1/2/2.5/3/4/5/6/7/8/9/10 in a new session; extend from here.
 
 **Phase 11 is explicitly not started, on the user's direct instruction.**
 The Phase 9 partial-output hotfix planned after Phase 10 (see Known gaps:
 `mux_and_encode()`/`.ass`/`.srt` could leave partial or stale output at the
-real destination on failure) is now done - `render/pipeline.py` publishes
-every output file only after a best-effort two-phase commit, with full
-regression passing (335/335). One more end-to-end check is planned before
-Phase 11 itself starts.
+real destination on failure) is done and E2E-verified against a real
+render (Preview + Final, real FFmpeg, frame-inspected) before Phase 11
+planning began. A separate Windows FFmpeg filtergraph path-escaping
+hotfix (see Known gaps) has also been completed since then, investigated
+and applied before starting Phase 11 CLI work specifically so the CLI
+would not be built on top of a still-open Windows-blocking defect - full
+regression passing (344/344), Linux-tested only, native Windows execution
+still unverified (see that Known gaps entry for exactly what remains
+open). Phase 11 (CLI integration) planning follows this hotfix.
 
 Phase 10 (`render/report.py`) implements the Stage 5 spec ch. 17 Render
 Report and owns version-numbered output path assignment
@@ -380,19 +385,75 @@ go through this session's GitHub-web-UI text-paste upload workflow.
   `subtitle.py`'s `ass_path` colon guard, just a different filter).
   `fontfile=<path>` is the only thing that works.
 
-- **Severity: real and OS-dependent, not a rare edge case.**
-  `render/subtitle.py::burn_subtitles()` rejects a colon in `ass_path` with
-  a `ValueError` before ever invoking FFmpeg (FFmpeg's own filtergraph
-  parser treats `:` as an option separator inside a `-vf` value). On
-  Windows, an absolute path is `C:\...` by construction, so this isn't an
-  occasional edge case there - it's the default shape of every absolute
-  path. `burn_subtitles()` today will refuse to run at all against a
-  Windows-style absolute `ass_path`. The same guard was added for
-  `render.fonts.FONT_DIR` in Phase 7, for the identical reason. Proper
-  filtergraph escaping (or writing the `.ass` file somewhere guaranteed
-  colon-free and passing a relative/short path instead) is unimplemented
-  and should be picked up before this pipeline is ever expected to run on
-  Windows.
+- ~~**Severity: real and OS-dependent, not a rare edge case.**
+  `render/subtitle.py::burn_subtitles()` rejects a colon in `ass_path`
+  with a `ValueError` before ever invoking FFmpeg... `burn_subtitles()`
+  today will refuse to run at all against a Windows-style absolute
+  `ass_path`.~~ **Windows path escaping defect fixed and Linux
+  FFmpeg-regression-tested. Native Windows execution remains unverified**
+  (no Windows environment was available to run this against a real
+  Windows FFmpeg build - see below for exactly what that leaves open).
+
+  Investigated as its own hotfix, separate from and before Phase 11 CLI
+  work. Two distinct failure modes were found, not one, and they were
+  confirmed empirically against a real FFmpeg binary rather than assumed:
+  - `ass=<path>:fontsdir=<path>` (`subtitle.py`): an unescaped colon
+    derails the filter's positional filename token and FFmpeg refuses to
+    run at all (`"Unable to parse option value ... as image size"` - a
+    genuinely confusing message for what is actually a colon in a
+    directory name). This was the failure mode the old `ValueError` guard
+    was reacting to.
+  - `drawtext=fontfile=<path>` (`overlay.py`, and the Preview watermark in
+    `encode.py`): an unescaped colon does **not** crash FFmpeg. It
+    silently truncates the `fontfile=` value at the colon and FFmpeg falls
+    back to some other font, exit code 0 - confirmed by rendering visibly
+    non-bold text from a request for the bold weight. `overlay.py`/
+    `encode.py` had no guard at all for this before the fix, so on Windows
+    this would have been a silent wrong-font bug, not a loud failure -
+    arguably worse than `subtitle.py`'s old crash, since nothing would
+    have told a user their overlays/watermark were wrong.
+
+  Fix: a new shared helper, `render/filter_escape.py::escape_filter_path()`,
+  used by all three call sites (`ass=`/`fontsdir=` in `subtitle.py`,
+  `fontfile=` in `overlay.py`, `fontfile=` in `encode.py`'s watermark).
+  It normalizes `\` path separators to `/`, then escapes `:` as **two**
+  literal backslashes followed by the colon - the exact escape depth was
+  determined by testing 1/2/3/4-backslash variants against a real FFmpeg
+  binary, not assumed from documentation; 1 fails, 2 works for both filter
+  types, 3 is redundant-but-tolerated, 4 fails again. On an ordinary POSIX
+  path (no colon, no backslash - true of every path already in this
+  project) the function is the identity transform, so Linux/macOS
+  behavior is unchanged - confirmed by the full existing suite passing.
+  `subtitle.py`'s old `raise ValueError` guards are gone; a colon-in-path
+  case is now handled, not refused.
+
+  New tests exercise both failure modes at two levels each: a pure
+  string-level assertion on the generated filter/command text (needed
+  specifically for the `drawtext` case, since FFmpeg's silent-fallback
+  leniency means "the render still succeeds" does not by itself prove
+  escaping happened - an earlier version of this test suite's `overlay`/
+  `encode` colon tests only checked stddev/`result.ok` and passed even
+  against the unescaped pre-fix code, a real gap caught and fixed before
+  landing), and a real-FFmpeg execution test per call site (a colon is a
+  legal POSIX filename character, so a real directory named with one
+  reproduces the same class of path Windows always has, without needing
+  Windows itself). Red/green performed against the pre-fix code for all
+  four new/changed tests: `subtitle.py`'s colon case still raises
+  `ValueError` as before (unchanged, expected), and both `overlay.py`/
+  `encode.py`'s colon cases now correctly fail the string-level assertion
+  (they did not fail before the assertion was strengthened - confirming
+  the strengthening itself was necessary, not just defensive).
+
+  **What remains genuinely unverified** (no Windows machine or CI runner
+  available in this project so far): whether `\` → `/` normalization
+  behaves identically against a real Windows `ffmpeg.exe` (well-documented
+  FFmpeg-on-Windows behavior, but not independently confirmed here);
+  `tempfile.TemporaryDirectory()`'s actual Windows path shape end to end
+  through the full render pipeline; `shutil.which("ffmpeg")` against real
+  Windows `PATHEXT`/`.exe` resolution; and Windows console
+  (cmd.exe/PowerShell) encoding behavior for Korean text output once a
+  CLI exists (Phase 11). None of this should be described as "Windows
+  supported" until a real Windows run confirms it.
 
 - `render/subtitle.py::generate_ass()` sets `PlayResX`/`PlayResY` to
   whatever resolution the caller supplies (typically the real input
