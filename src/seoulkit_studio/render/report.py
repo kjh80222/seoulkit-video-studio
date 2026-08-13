@@ -93,12 +93,16 @@ _STAGE_NAMES = {
     "BurnInResult": "burn_subtitles",
     "AudioMixResult": "mix_audio",
     "EncodeResult": "mux_and_encode",
+    "PublishResult": "publish_outputs",
 }
 
 _ERROR_MESSAGES = {
     "ffmpeg_failed": "FFmpeg exited with non-zero status",
     "ffmpeg_not_found": "ffmpeg executable not found on PATH",
     "bundled_font_error": "bundled font asset missing or invalid",
+    "publish_copy_failed": "failed to stage a rendered output file for publish",
+    "publish_commit_failed": "failed to commit a staged output file to its real destination",
+    "publish_rollback_failed": "commit failed and rollback of already-committed files also failed",
 }
 
 
