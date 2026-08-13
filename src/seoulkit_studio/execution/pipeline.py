@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from seoulkit_studio.execution.clip_manifest import check_clip_manifest_consistency
+from seoulkit_studio.execution.clip_manifest import check_clip_manifest_consistency, check_sfx_contract_resolution
 from seoulkit_studio.execution.plan_loader import LoadError, load_plan_file
 from seoulkit_studio.execution.result import (
     PlanStatus,
@@ -60,7 +60,9 @@ def evaluate_plan(
     if structure_failed or clip_manifest_path is None:
         clip_manifest_issues: list[PreflightIssue] = []
     else:
-        clip_manifest_issues = check_clip_manifest_consistency(load_result.data, clip_manifest_path)
+        clip_manifest_issues = check_clip_manifest_consistency(
+            load_result.data, clip_manifest_path
+        ) + check_sfx_contract_resolution(load_result.data, clip_manifest_path)
 
     all_issues = preflight_result.issues + clip_manifest_issues
     execution_result = compute_execution_result(None, all_issues)
