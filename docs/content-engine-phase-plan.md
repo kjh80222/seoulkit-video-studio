@@ -19,7 +19,7 @@ exists at all.
 | CE-1 | `jobs` table + `Job`/`JobState` data model (no queue, no persistence abstraction) | ✅ Done |
 | CE-2A | Job state transitions (validation + atomic SQLite updates, no worker) | ✅ Done |
 | CE-2B | Single worker / queue execution (worker loop, queue polling, pause/resume/stop/cancel *enforcement*, crash recovery, retry) | Not started |
-| CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | Not started |
+| CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | ✅ Done |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | Not started |
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
 | CE-5 | Google Flow human checkpoint (`AWAITING_HUMAN_ASSET` job state) | Not started |
@@ -251,3 +251,111 @@ Two red/green demonstrations were performed before landing:
    suite (469/469) green again.
 
 No `seoulkit_studio` file, and no CE-1 file, was touched during CE-2A.
+
+## Design refinement (before CE-3 implementation)
+
+CE-3 investigation surfaced a real exit-code collision (see below), and an
+approval-round review of the resulting design caught one more issue
+before any code was written:
+
+**`preflight`'s `REVIEW_REQUIRED`/`NOT_READY` outcomes are not adapter
+failures.** An earlier draft of `_classify()` treated `preflight`'s exit
+1 (`REVIEW_REQUIRED`) and exit 2 (`NOT_READY`) identically to
+`preview`/`render`'s genuine gate-rejection exit codes, labeling both
+`GATE_REJECTED`. That contradicts `preflight`'s own nature: it's a
+read-only validation operation, not a gated execution. A `preflight` call
+that runs successfully and *discovers* `NOT_READY` is an adapter
+**success** (`ok=True`) - no render was ever attempted, so nothing failed.
+Only `preview`/`render` can be gate-*rejected*, because only they attempt
+to run something a gate can refuse. `_classify()` was made command-aware
+(`_classify(command, exit_code, stdout)`) specifically to keep these two
+meanings apart, rather than sharing one exit-code table across all three
+commands.
+
+## CE-3: Video Studio Adapter
+
+**Files**: new `src/content_engine/video_studio/__init__.py`; new
+`src/content_engine/video_studio/adapter.py`; new
+`tests/test_ce_video_studio_adapter.py`. **No schema change, no new
+dependency.**
+
+**Boundary**: this module is the only place in Content Engine allowed to
+shell out to Video Studio, and it does so exactly as
+`[sys.executable, "-m", "seoulkit_studio.cli.main", command, str(project_dir), "--json"]`
+- a real subprocess reading `--json` stdout, never an import of
+`seoulkit_studio` internals. Command scope is exactly `preflight`,
+`preview`, `render` (`status`/`report` are out of scope). This module does
+not call CE-2A's transition functions, does not know about `job_id`/
+`JobState`, does not touch the database, does not create project
+directories, does not implement timeout/retry/cancel/pause/worker/queue,
+and does not re-parse Render Report file contents - `output_path`/
+`report_path`/`log_path` are passed through exactly as the CLI's JSON
+payload already exposes them.
+
+**Exit-code collision found and defended against**: an argparse-level
+usage error (e.g. a missing required `project_dir` positional) exits with
+code 2 and leaves stdout completely empty, colliding numerically with the
+app's own domain `NOT_READY=2`. `_classify()` never trusts the exit code
+before confirming stdout parses as a JSON object shaped like a real Video
+Studio payload (`effective_status` present, or `error`/`exit_code` present
+for a usage error) - a bare exit code alone can't tell them apart, but a
+valid payload always accompanies a real domain outcome and an argparse
+error never produces one. The same check also covers the empirically
+confirmed shape of an uninstalled `seoulkit_studio` (a bare venv without
+the package produces a normal exit=1, empty stdout, plain-text
+`ModuleNotFoundError` on stderr - not a Python-level `FileNotFoundError`
+in the calling process) - both collapse into the same
+`ADAPTER_INVOCATION_ERROR` bucket rather than a speculative dedicated
+category.
+
+**`AdapterFailureCategory`** (4 values): `GATE_REJECTED`,
+`EXECUTION_FAILED`, `USAGE_ERROR`, `ADAPTER_INVOCATION_ERROR`. No
+`SEOULKIT_STUDIO_NOT_FOUND` - removed after empirical testing showed that
+failure mode is indistinguishable in shape from the argparse collision.
+
+**`_classify(command, exit_code, stdout)`** (command-aware, see refinement
+above): `preflight` treats exit 0/1/2 with a valid payload as `ok=True`
+regardless of `effective_status`; `preview`/`render` treat exit 0 as
+`ok=True`, exit 1/2 as `GATE_REJECTED`, exit 3 as `EXECUTION_FAILED`. Both
+branches treat exit 4 with a valid `{"error", "exit_code"}` payload as
+`USAGE_ERROR`, and anything with a malformed/empty/unexpected-shaped
+stdout as `ADAPTER_INVOCATION_ERROR`. `_run_cli()` additionally catches a
+stray `OSError` from `subprocess.run()` itself and converts it to
+`ADAPTER_INVOCATION_ERROR` rather than letting it propagate raw. Payload
+validation is a minimal key-presence check, not a schema library.
+
+**Public functions**: `run_preflight(project_dir)`, `run_preview
+(project_dir)`, `run_render(project_dir)`, each a thin wrapper over
+`_run_cli(command, project_dir) -> AdapterResult`.
+
+**Testing**: 32 new cases across 5 groups - `_classify()` for `preflight`
+(6 cases: exit 0/1/2 all `ok=True`, exit 4 `USAGE_ERROR`, the argparse
+exit-2/empty-stdout collision, malformed JSON), `_classify()` for
+`preview`/`render` (7 cases x 2 commands = 14: exit 0 `ok=True`, exit 1/2
+`GATE_REJECTED`, exit 3 `EXECUTION_FAILED`, exit 4 `USAGE_ERROR`, the same
+argparse collision, malformed JSON), minimal payload-shape validation (3
+cases: a JSON array instead of an object, a dict missing
+`effective_status`, an exit-4 dict missing `error`/`exit_code`), real
+subprocess-level `_run_cli()` behavior (6 cases: a monkeypatched stray
+`OSError` converted to `ADAPTER_INVOCATION_ERROR`, a real successful
+`preflight`, a real successful `render` with `output_path` verified
+against the actual file on disk, a real `NOT_READY` `render` producing
+`GATE_REJECTED`, a real invocation against a bare venv that never had
+`seoulkit_studio` installed, and a real argparse collision reproduced by
+omitting the required `project_dir` argument), and public-function wiring
+(3 cases: each of `run_preflight`/`run_preview`/`run_render` calls
+`_run_cli()` with the correct command string). Full suite: 501/501
+passing (394 Video Studio + 9 CE-1 + 66 CE-2A + 32 CE-3), zero
+regressions.
+
+One red/green demonstration was performed before landing, reproducing the
+exact bug caught during design review: reverted `_classify()`'s
+`preflight` branch to classify exit 1/2 as `GATE_REJECTED` instead of
+`ok=True`. Exactly two tests failed -
+`test_classify_preflight[exit1-ok]` and `test_classify_preflight[exit2-ok]`
+- with every other case (including the 14 `preview`/`render` cases and all
+6 real-subprocess cases) unaffected. Reverted, full suite (501/501) green
+again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A file, was touched during
+CE-3.
