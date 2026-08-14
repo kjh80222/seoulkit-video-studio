@@ -17,7 +17,8 @@ exists at all.
 | Phase | Scope | Status |
 |---|---|---|
 | CE-1 | `jobs` table + `Job`/`JobState` data model (no queue, no persistence abstraction) | ✅ Done |
-| CE-2 | Job Manager (single-worker queue, state transitions, retry/failure recording) | Not started |
+| CE-2A | Job state transitions (validation + atomic SQLite updates, no worker) | ✅ Done |
+| CE-2B | Single worker / queue execution (worker loop, queue polling, pause/resume/stop/cancel *enforcement*, crash recovery, retry) | Not started |
 | CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | Not started |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | Not started |
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
@@ -115,37 +116,3 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     completed_at TEXT
 );
-```
-`stage`/`error_message` exist now (a MoneyPrinterTurbo-inspired per-stage
-failure-recording hook, see the external-research report this plan
-follows from) even though nothing populates them yet in CE-1 - they cost
-one nullable column each and don't presuppose any particular job type's
-stages, unlike `content_package_id`/`retry_count`, which were cut because
-they'd be silently unused *and* couple `jobs` to concepts (a specific FK
-target, a specific retry policy) CE-1 doesn't own.
-
-**`JobState`** (`jobs/models.py`): exactly 7 values -
-`PENDING/PROCESSING/PAUSED/STOPPED/CANCELLED/COMPLETE/FAILED`. Deliberately
-excludes `AWAITING_HUMAN_ASSET` (a CE-5 concept) - adding a new state to a
-SQLite `TEXT` column needs no schema migration, only a Python enum
-addition when CE-5 actually needs it.
-
-**Testing**: 9 new tests (`test_ce_db.py`: table creation, exact column
-list, parent-directory auto-creation, idempotent re-connection;
-`test_ce_jobs_models.py`: `JobState`'s 7 values, explicit absence of
-`AWAITING_HUMAN_ASSET`, `Job`'s optional-field defaults, and two raw-SQL
-round-trip tests - one with all fields populated, one confirming `NULL`
-columns round-trip correctly). Full suite: 403/403 passing (394 existing
-Video Studio + 9 new), zero regressions.
-
-Two red/green demonstrations were performed before landing:
-1. Renamed `schema.sql`'s `error_message` column to `error_msg` (a
-   realistic schema/model-drift bug) - 3 tests failed exactly as expected
-   (`sqlite3.OperationalError: table jobs has no column named
-   error_message`), confirming the round-trip tests actually exercise the
-   real column names rather than trivially passing. Reverted, full CE-1
-   suite green again (9/9).
-2. Removed `JobState.FAILED` - `test_job_state_has_exactly_seven_values`
-   failed with the exact missing value reported. Reverted, green again.
-
-No `seoulkit_studio` file was touched during CE-1.
