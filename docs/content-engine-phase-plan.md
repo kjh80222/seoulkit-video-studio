@@ -18,7 +18,7 @@ exists at all.
 |---|---|---|
 | CE-1 | `jobs` table + `Job`/`JobState` data model (no queue, no persistence abstraction) | ✅ Done |
 | CE-2A | Job state transitions (validation + atomic SQLite updates, no worker) | ✅ Done |
-| CE-2B | Single worker / queue execution (worker loop, queue polling, pause/resume/stop/cancel *enforcement*, crash recovery, retry) | Not started |
+| CE-2B | Single worker / queue execution (worker loop, atomic claim, dispatch to CE-4b-4f/CE-6, `jobs.payload` for human decisions with no file format of their own, CE-5-gated `preview_render`/`final_render`, crash recovery via stale-row detection - no automatic retry) | ✅ Done |
 | CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | ✅ Done |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | ✅ Done |
 | CE-4b | Topic/Research / Stage 1 Producer (`stage1_beat_shot_table.json` -> `list[PlannedShot]`; Human + LLM assisted, no LLM API/web research call from Content Engine) | ✅ Done |
@@ -1381,3 +1381,165 @@ gate-rejection preservation test, unaffected. Reverted, full suite
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
 CE-4e/CE-4f/CE-4b file, was touched during CE-6. DB schema unchanged.
+
+## Architecture Freeze Review (before CE-2B implementation)
+
+CE-2B was re-investigated from scratch after CE-6 gave it, for the first
+time, a real "job body" to execute - the original deferral reason ("no job
+body exists yet") no longer held. The investigation and design rounds
+surfaced two gaps neither the original phase description nor the CE-1/CE-5
+precedent anticipated, plus a set of locked decisions on top of them:
+
+1. **Job granularity: one Job per automatable step, not one Job per whole
+   project.** CE-4b's own output was already established as "in-memory
+   only, no file of its own" - so CE-4b (parse+validate Stage 1) and CE-4c
+   (build+write `stage2_input.json`) collapse into a single job type,
+   `stage2_input_build`, since there is no on-disk boundary between them a
+   job system could observe or trigger against. The other four job types
+   (`stage3_input_build`, `clip_manifest_build`, `edit_plan_build`,
+   `preview_render`, `final_render`) map one-to-one onto CE-4d/CE-4e/CE-4f/
+   CE-6's own existing `build_*()`/`write_*()`/`render_project()`
+   functions.
+2. **Human-in-the-loop gates are represented by a Job simply not existing
+   or not progressing - no new `JobState`.** `AWAITING_HUMAN_ASSET` (CE-1's
+   own placeholder name for this) is still not added; CE-5 shipped without
+   it, and CE-2B follows the same precedent. Stage 2 keyframes and Stage 3
+   Flow clips are the two human-only gaps this repository has no producer
+   for at all - CE-2B does not close them, and does not pretend to.
+3. **No automatic retry.** `retry_count`/`max_retries`/`heartbeat_at`/
+   `worker_id`/`next_attempt_at` were all considered and rejected on the
+   same YAGNI grounds CE-1 already used for `content_package_id` - none of
+   the six job bodies benefit from blind retry (deterministic-validation
+   and human-input-missing failures just fail again identically), and the
+   project has no confirmed need yet for multi-worker coordination.
+4. **Artifact idempotency: create-only stays create-only.** CE-4c/CE-4d/
+   CE-4e/CE-4f's existing `FileExistsError`-on-overwrite guards are not
+   touched, wrapped, or given a special recovery path. A job that fails
+   after its artifact was already written on disk (e.g. a crash between
+   the file write and the DB commit) is recorded `FAILED` and left for a
+   human to inspect - no automatic "artifact exists, assume success"
+   recovery was added, since that could silently accept a half-written or
+   stale file.
+5. **`jobs.content_package_id` added, this phase.** CE-1's Architecture
+   Freeze Review explicitly deferred this exact column "until the real
+   query patterns against `jobs` are known" - CE-2B is where they became
+   known (every job body needs `project_dir`, reachable only by joining
+   through `content_package_id`).
+6. **`preview_render`/`final_render` are separate job types**, gated by
+   CE-5's existing `check_asset_readiness()` *before* a job is even
+   claimed (not a new job type of its own, not a call CE-6 makes
+   internally) - a gate failure leaves the job `PENDING`, untouched, for a
+   future poll cycle, exactly like any other human-gate wait.
+7. **Two new discoveries, surfaced mid-plan and explicitly approved before
+   implementation**: no reader ever existed for `stage2_input.json`/
+   `stage3_input.json`/`clip_manifest.json`/`edit_plan.json` (every
+   existing test only ever *wrote* these and kept the in-memory object for
+   itself), and `Stage2ShotOutput`/`ShotQcDecision`/`HumanVoiceTimingInput`/
+   `HumanSemanticSyncSegment`/`HumanOverlayDecision`/`HumanSfxDecision` had
+   no file format at all. Resolved as: a new CE-2B-owned module
+   (`jobs/artifacts.py`) holding the four readers (never touching CE-4c/
+   CE-4d/CE-4e/CE-4f's own files), and a new `jobs.payload` `TEXT` (JSON)
+   column carrying the six human-decision dataclasses verbatim - not a new
+   on-disk file convention, since these dataclasses already existed and
+   were already approved in their own phases' design rounds.
+8. **CE-2B never re-implements CE-4a-4f/CE-3/CE-5/CE-6's own logic**, and
+   never generates, infers, or defaults a human judgment value
+   (`ShotQcDecision`, Semantic Sync, overlay/SFX decisions, which mode to
+   render, when to approve a final render) - every handler's payload is
+   supplied by whoever calls `create_job()`; CE-2B only deserializes,
+   dispatches, and records the outcome.
+
+## CE-2B: Worker / Queue Execution
+
+**Files**: new `src/content_engine/db/migrations.py`,
+`jobs/{creation.py,claim.py,artifacts.py,dispatch.py,worker.py}`; new
+`tests/{test_ce_db_migrations.py,test_ce_jobs_creation.py,
+test_ce_jobs_claim.py,test_ce_jobs_artifacts.py,test_ce_jobs_dispatch.py,
+test_ce_jobs_worker.py}`. Modified (additive only, no existing behavior
+changed): `db/connection.py` (one line - calls `apply_migrations()`),
+`jobs/models.py` (`Job` gains `content_package_id`/`payload`, both
+optional, defaulting to `None`), `tests/test_ce_db.py`/
+`tests/test_ce_jobs_models.py` (updated for the two new columns/fields).
+**`db/schema.sql` itself and `jobs/transitions.py` are untouched** - the
+new columns are added by `db/migrations.py`'s idempotent `ALTER TABLE`
+list, applied by `get_connection()` right after `schema.sql` runs, safe on
+both a brand-new DB and one already migrated.
+
+**`create_job(conn, content_package_id, job_type, payload=None)`**
+(`jobs/creation.py`): the sole `INSERT INTO jobs` outside a test. Validates
+`job_type` against the six known types and that `content_package_id`
+exists, then stores `payload` as JSON (`UnknownJobTypeError`/
+`ContentPackageNotFoundError` on failure). `content_package_create`
+(CE-4a) is deliberately not one of the six - it still has no
+`content_package_id` to attach to at the moment it runs, and stays a
+direct synchronous call exactly as CE-4a designed it.
+
+**`claim_next_runnable_job(conn)`** (`jobs/claim.py`): scans `PENDING` rows
+oldest-first; for `preview_render`/`final_render` it calls CE-5's
+`check_asset_readiness()` first and skips (leaves `PENDING`) a not-ready
+row rather than claiming it. The actual `PENDING -> PROCESSING` transition
+reuses CE-2A's own `start_job()` unmodified - a lost race
+(`InvalidJobTransitionError`) just moves on to the next candidate. A
+`check_asset_readiness()` infrastructure failure (Video Studio itself
+failing to run, not "clip missing") propagates rather than being
+swallowed into "not ready", matching CE-5's own documented behavior.
+
+**`jobs/artifacts.py`**: `read_stage2_input()`/`read_stage3_input()`/
+`read_clip_manifest()`/`read_edit_plan()` (structural inverses of each
+module's own `write_*()`), plus `stage2_outputs_to_payload()`/
+`_from_payload()`, `qc_decisions_to_payload()`/`_from_payload()`, and
+`edit_plan_human_input_to_payload()`/`_from_payload()` for the six
+human-decision dataclasses. Malformed input surfaces as a plain
+`KeyError`/`TypeError` - no parallel validation layer to CE-4b's own.
+
+**`dispatch(conn, job)`** (`jobs/dispatch.py`): a `job_type -> handler`
+lookup, six handlers, each doing exactly (1) load prerequisites via
+`artifacts.py`/`job.payload`, (2) call the existing CE-4b-4f `build_*()`/
+`write_*()` or CE-6's `render_project()` unmodified, (3) `complete_job()`
+on success or `fail_job(error_message=str(exc))` on any exception - no
+curated exception list. `preview_render`/`final_render` never re-call
+`check_asset_readiness()` (already done once, before claim) - a residual
+`GATE_REJECTED` (CE-5's readiness check is narrower than full preflight,
+e.g. it does not check `MISSING_VOICE_ASSET`/`MISSING_BGM_FILE`/
+`MISSING_SFX_FILE`) is recorded `FAILED` with the full `issues` list in
+`error_message`, on the same "a human must act, no automatic retry"
+principle as any other failure here.
+
+**`run_worker(conn, poll_interval_seconds=5.0, stop_event=None,
+stale_after_seconds=3600)`** (`jobs/worker.py`): claim one job, dispatch
+it, repeat; wait `poll_interval_seconds` and retry when nothing is
+claimable. `stop_event` (a `threading.Event`) is checked only between
+jobs, never mid-job - every job body is a short synchronous call (one file
+read/write, one `ffprobe` invocation, or one `seoulkit-studio` subprocess
+call), so there is nothing to interrupt mid-flight. On startup, any row
+still `PROCESSING` past `stale_after_seconds` with no `updated_at` change
+is moved to `FAILED` via CE-2A's own `fail_job()` (not a raw `UPDATE`) -
+no new `heartbeat_at`/`worker_id` column, matching Freeze Review point 3.
+Single-worker v1: `claim_next_runnable_job()`'s atomicity would already
+make a second concurrent worker safe, but nothing here coordinates or
+detects one.
+
+**Testing**: 48 new cases (4 `test_ce_db_migrations.py`, 12
+`test_ce_jobs_creation.py`, 9 `test_ce_jobs_claim.py`, 11
+`test_ce_jobs_artifacts.py`, 6 `test_ce_jobs_dispatch.py` including a full
+six-job happy-path pipeline exercising every handler end to end with real
+`ffmpeg`/`ffprobe`-generated media and a real `seoulkit-studio` preview/
+final render, 5 `test_ce_jobs_worker.py`), plus 1 new case in
+`test_ce_jobs_models.py` for the two new `Job` fields. Full suite:
+740/740 passing (692 prior + 48 new), zero regressions.
+
+One red/green demonstration was performed before landing, on CE-2B's core
+architectural promise - `preview_render`/`final_render` never bypass the
+human-supplied-Flow-clip gate. Removed the `check_asset_readiness()` gate
+check from `claim_next_runnable_job()`. Exactly 3 of `test_ce_jobs_claim.py`'s
+9 cases failed - the two gate-skip tests and the readiness-infrastructure-
+failure-propagation test - with the other 6 (including the "claims the
+oldest pending non-gated job" and "claims once ready" cases) unaffected.
+Reverted, full suite (740/740) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
+CE-4e/CE-4f/CE-4b/CE-6 file, was touched during CE-2B beyond the four
+explicitly-disclosed additive changes above (all direct consequences of
+adding `content_package_id`/`payload` to `Job`). `db/schema.sql` itself is
+byte-identical to its CE-1 version; the new columns are applied entirely
+by `db/migrations.py`.
