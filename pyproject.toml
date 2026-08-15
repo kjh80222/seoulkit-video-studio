@@ -19,6 +19,7 @@ dev = [
 
 [project.scripts]
 seoulkit-studio = "seoulkit_studio.cli.main:main"
+content-engine = "content_engine.cli.main:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
