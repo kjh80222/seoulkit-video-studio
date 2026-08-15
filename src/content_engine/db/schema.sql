@@ -9,3 +9,11 @@ CREATE TABLE IF NOT EXISTS jobs (
     started_at TEXT,
     completed_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS content_packages (
+    id TEXT PRIMARY KEY,
+    topic TEXT NOT NULL,
+    project_dir TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
