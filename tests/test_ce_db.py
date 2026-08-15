@@ -18,6 +18,7 @@ def test_jobs_table_has_exactly_the_expected_columns(tmp_path):
     assert columns == [
         "id", "job_type", "state", "stage", "error_message",
         "created_at", "updated_at", "started_at", "completed_at",
+        "content_package_id", "payload",
     ]
 
 
