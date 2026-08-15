@@ -25,7 +25,7 @@ exists at all.
 | CE-4c | Stage 1 → Stage 2 Handoff Package (`stage2_input.json` - Stage 1 content data only, no Stage 2/3/4 creative or measured values) | ✅ Done |
 | CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json` - merges CE-4c's Stage 1 data with Stage 2's structured output by shot identity; `expected_clip_filename()` first computed/consumed here) | ✅ Done |
 | CE-4e | Stage 3 QC Assist (`clip_manifest.json` - Human-Assisted QC, not automatic video QC; `sfx_contract_version=1` adopted) | ✅ Done |
-| CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Stage 5 remains a read-only consumer) | Not started |
+| CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Human-Authored Voice/Semantic-Sync/SFX input, no TTS/alignment execution) | ✅ Done |
 | CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
 | CE-6 | Video Studio invocation wiring (preflight → preview → render via CE-3) | Not started |
 
@@ -999,3 +999,153 @@ unaffected. Reverted, full suite (592/592) green again.
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d
 file, was touched during CE-4e. DB schema unchanged. CE-4f remains
 registered in the phase table as "Not started" - not implemented.
+
+## Architecture Freeze Review (before CE-4f implementation)
+
+CE-4f's scope was investigated and narrowed across several review rounds,
+grounded in the Stage 4 manual (`SEOULKIT_Stage4_MINI_Voice_Edit_Plan_Manual_v2.0`)
+and real repository code (`schema/edit_plan.schema.json`,
+`preflight/validator.py`, `execution/clip_manifest.py`,
+`execution/pipeline.py`, `execution/result.py`, `render/audio_mix.py`,
+`render/hold.py`, `cli/project.py`):
+
+- **CE-4f v1 does not call any TTS engine or forced-alignment tool.** The
+  manual itself refuses to hardcode a vendor ("특정 TTS 서비스에 시스템을
+  하드코딩하지 않는다"), and running one now would pull API auth, cost,
+  and retry handling into this phase before any of that is decided.
+  Instead CE-4f consumes a `HumanVoiceTimingInput` a human prepares
+  outside this pipeline. TTS/alignment automation is left for a future,
+  separate phase.
+- **Semantic Sync - which shot plays under which stretch of narration,
+  and the exact `clip_in_ms`/`clip_out_ms` of that footage - is
+  human-authored** (`HumanSemanticSyncSegment`), not computed from
+  `usable_start_ms`. An earlier draft had CE-4f auto-select
+  `clip_in_ms=usable_start_ms`/`clip_out_ms=usable_start_ms+required_ms`;
+  review caught that this silently re-decides an editorial judgment
+  Semantic Sync already made. CE-4f's own job narrowed to verifying the
+  selected range isn't longer than its timeline slot, and computing
+  whether a Hold is needed for any shortfall.
+- **`selected_ms > required_ms` (the human-selected clip range exceeds
+  the timeline slot) is a build failure, not a `REVIEW_REQUIRED` plan.**
+  `end_ms - start_ms == clip_out_ms - clip_in_ms + hold_ms` can never hold
+  for any `hold_ms >= 0` in that case - Stage 5's own duration invariant
+  is already broken, so this is not a plan a human could usefully review;
+  `edit_plan.json` is not written at all.
+- **`timing_grade`/`voice.aligned` are schema-typed but never read by any
+  Video Studio check** (confirmed by full-repo grep of
+  `preflight/validator.py` and `execution/`) - `compute_effective_status()`
+  only blends the plan's own declared `status` with Pre-flight's issue
+  list, never timing grade. This means `status="READY"` requiring
+  `timing_grade_default=="EXACT"` **and** every segment `status=="OK"` is
+  enforced nowhere except CE-4f itself - a new CE-4f data-integrity
+  contract, not a rediscovery of an existing one.
+- **`NOT_READY` is never written into `edit_plan.json`.** A missing or
+  mismatched required input (identity mismatch across
+  `stage3_input.json`/`clip_manifest.json`/human inputs) raises an
+  exception instead, matching CE-4c/CE-4d/CE-4e's own precedent of never
+  writing a file when required input isn't trustworthy enough to build
+  from.
+- **`optional_source_audio.file`'s meaning (deferred by CE-4e) is
+  resolved here for `discarded` entries only, as a v1-only compatibility
+  representation.** `edit_plan.schema.json`'s `sfx_source.clips[]`
+  requires `file` to be a non-null string regardless of `action`
+  (`"required": ["shot","file","action"]`, `"file": {"type":"string"}`).
+  `check_file_existence()` only checks `.file` when `action=="adopted"`,
+  and `check_sfx_contract_resolution()` never reads `.file` at all
+  (re-confirmed). CE-4f writes `file=""` for `discarded` entries -
+  explicitly documented as a compatibility placeholder required by the
+  frozen schema's string constraint, not as a real audio asset path, and
+  never treated as one by any code that reads it. `adopted` still requires
+  a real, existing, human-supplied project-relative file.
+- **BGM is fixed to `mode="none"` unconditionally.** The manual's own
+  layer-authority table (ch.13) assigns BGM to "Stage 5(프로듀서)의 선택"
+  - Stage 4 has no BGM decision to make at all in this pipeline.
+- **Overlay text comes only from `stage2_input.json`'s `screen_number`/
+  `screen_label`** (CE-4c's preserved copy of Stage 1 data) - CE-4f reads
+  `stage2_input.json` read-only, for this purpose alone, rather than
+  re-deriving or re-collecting Stage 1 content through a new human input
+  (which would create a second source of truth) or retroactively adding
+  these fields to the already-frozen `stage3_input.json` (CE-4d, which
+  deliberately excluded them since Stage 3 never needed them). Overlay
+  *position*/*exposure window* remain a separate human decision
+  (`HumanOverlayDecision`), since the manual's own conflict-resolution
+  rule ("겹치면 자동 대체 위치 제안") has no concrete algorithm specified.
+- **Human input dataclasses and the frozen `edit_plan.json` output shape
+  are fully separate types**, never conflated. An earlier draft used
+  `HumanVoiceTimingInput` (`timing_grade`/`audio_file`/`total_duration_ms`)
+  directly as `EditPlan.voice` - caught in review, since the real
+  `voice` object is `{audio_file, aligned, total_duration_ms}` and has no
+  `timing_grade` field. `EditPlanVoice`/`EditPlanSfxClip`/
+  `EditPlanSfxSource`/`EditPlanBgm`/`EditPlanAudioLayers`/`EditPlanWarning`
+  were added specifically so every output dataclass mirrors the frozen
+  schema tree field-for-field, and `edit_plan.py` converts Human* input
+  into them rather than serializing human input directly.
+
+## CE-4f: Stage 4 Voice / Alignment / Semantic Sync
+
+**Files**: new `src/content_engine/video_planning/edit_plan.py`; modified
+`src/content_engine/video_planning/models.py` (new `HumanVoiceTimingInput`/
+`HumanSemanticSyncSegment`/`HumanOverlayDecision`/`HumanSfxDecision`/
+`EditPlanVoice`/`EditPlanSegment`/`EditPlanOverlay`/`EditPlanSubtitle`/
+`EditPlanSfxClip`/`EditPlanSfxSource`/`EditPlanBgm`/`EditPlanAudioLayers`/
+`EditPlanWarning`/`EditPlan`), `tests/test_ce_video_planning_models.py`
+(field-shape tests for the 14 new dataclasses); new
+`tests/test_ce_video_planning_edit_plan.py`. **No schema change, no new
+dependency (`ffprobe` reused from CE-4e's own pattern), no DB change.**
+
+**`measure_voice_duration(audio_file)`**: real `ffprobe` subprocess call
+for `AUDIO_BASED`/`EXACT` grades' `voice.total_duration_ms` - mechanical
+container measurement, not TTS/alignment. `ESTIMATED` uses the human's own
+`total_duration_ms` directly (no final Voice audio exists to measure).
+`voice.aligned` is derived (`timing_grade == "EXACT"`), never asked for
+independently.
+
+**`compute_clip_fit(...)`**: the Hold branch table (5 outcomes - `none`,
+`source_hold`, `settle_frame_hold` OK, `settle_frame_hold` REVIEW_REQUIRED
+over the cap, and REVIEW_REQUIRED for missing `key_event_end_ms`/
+`settle_start_ms` when a classification/hold decision needs them) fully
+described in `edit_plan.py`'s module docstring.
+
+**`build_edit_plan(...)`**: fixed validation order - voice input
+consistency, voice file existence, 3-way shot identity
+(`stage3_input`/`clip_manifest`/`semantic_sync`), overlay identity, SFX
+identity + adopted-file-existence, `start_ms<end_ms`, then
+`selected_ms<=required_ms` (build failure if violated) - only after all
+of that does it compute segments/overlays/subtitles/`audio_layers`/
+project `status` and return an `EditPlan`. `write_edit_plan(...)`
+performs no source-file lookups of its own, only the
+`edit_plan.json`-already-exists overwrite guard (`FileExistsError`) and a
+single UTF-8-explicit write.
+
+**Testing**: 62 new cases - 10 dataclass field-shape tests (in
+`test_ce_video_planning_models.py`) + 52 in
+`test_ce_video_planning_edit_plan.py`: voice input consistency/measurement
+(7), 3-way shot identity (5), overlay identity (3), SFX identity +
+file-validation (5), semantic-sync timing (1) and clip-selection-overflow
+build-failure (2), `compute_clip_fit()`'s 8 branch cases, project `status`
+(3), subtitle wrap + overflow warning (3), overlay generation (4), SFX
+mapping (4), BGM (1), `write_edit_plan()` (4), `measure_voice_duration()`
+(1), and **one integration test that writes a real `edit_plan.json` via
+CE-4f and passes it through CE-3's `run_preflight()` unmodified** - the
+actual frozen Video Studio subprocess boundary, not a direct
+`seoulkit_studio.schema` import - confirming the full `voice`/`segments`/
+`overlays`/`subtitles`/`audio_layers.voice`/`audio_layers.sfx_source`/
+`audio_layers.bgm`/`warnings` serialization shape matches the real
+enforced contract, including a `discarded` SFX entry with `file=""`.
+Full suite: 654/654 passing (394 Video Studio + 9 CE-1 + 66 CE-2A + 32
+CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c + 17 CE-4d + 28 CE-4e + 62 CE-4f),
+zero regressions.
+
+One red/green demonstration was performed before landing, on the phase's
+most architecturally important guarantee - the duration invariant nothing
+else in the pipeline protects. Removed the `selected_ms > required_ms`
+check (and its `raise ClipSelectionExceedsRequiredDurationError`) from
+`build_edit_plan()`. Exactly two tests failed -
+`test_raises_when_clip_selection_exceeds_required_duration` and
+`test_collects_all_clip_selection_overflow_violations` (both "DID NOT
+RAISE") - with the other 50 `test_ce_video_planning_edit_plan.py` cases,
+including the CE-3 `run_preflight()` integration test, unaffected.
+Reverted, full suite (654/654) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
+CE-4e file, was touched during CE-4f. DB schema unchanged.
