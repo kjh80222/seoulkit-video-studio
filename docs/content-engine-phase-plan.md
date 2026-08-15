@@ -24,10 +24,23 @@ exists at all.
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
 | CE-4c | Stage 1 → Stage 2 Handoff Package (`stage2_input.json` - Stage 1 content data only, no Stage 2/3/4 creative or measured values) | ✅ Done |
 | CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json` - merges CE-4c's Stage 1 data with Stage 2's structured output by shot identity; `expected_clip_filename()` first computed/consumed here) | ✅ Done |
-| CE-4e | Stage 3 QC Assist (`clip_manifest.json` - measuring real Flow clips, Stage 3 QC's responsibility per the file's own header comment) | Not started |
+| CE-4e | Stage 3 QC Assist (`clip_manifest.json` - Human-Assisted QC, not automatic video QC; `sfx_contract_version=1` adopted) | ✅ Done |
 | CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Stage 5 remains a read-only consumer) | Not started |
 | CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
 | CE-6 | Video Studio invocation wiring (preflight → preview → render via CE-3) | Not started |
+
+**Phase number ≠ runtime execution order.** CE-5 was implemented before CE-4e/CE-4f, but functionally requires `edit_plan.json` to exist (it checks `edit_plan.json` loads and has no `MISSING_CLIP`) - a file only CE-4f can produce. The real per-project data-flow order, confirmed against `execution/clip_manifest.py`'s "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies" contract (ch. 24) and `preflight`'s own file-existence checks, is:
+
+```
+CE-4d (stage3_input.json)
+  → Human + Google Flow (MP4 clips)
+  → CE-4e (clip_manifest.json)
+  → CE-4f (edit_plan.json)
+  → CE-5 (Flow clip readiness gate)
+  → CE-6 (Video Studio invocation: preflight → preview → render)
+```
+
+CE-5's own design (see its Freeze Review below) remains correct and independently testable exactly as documented - this note only clarifies that its *position in the phase table* is not its *position in the pipeline*.
 | CE-7 | Metadata generation (LLM-based title/description/tags) | Not started |
 | CE-8 | Scheduler (publish date/time calculation) | Not started |
 | CE-9a | YouTube Publisher (+ first real credential store) | Not started |
@@ -833,4 +846,156 @@ Reverted, full suite (564/564) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c file,
 was touched during CE-4d. DB schema unchanged. CE-4e/CE-4f remain
+registered in the phase table as "Not started" - not implemented.
+
+## Architecture Freeze Review (before CE-4e implementation)
+
+CE-4e's scope was investigated and narrowed across several review rounds,
+grounded in the Stage 3 manual (ch. 13 "G4 CLIP QUALITY CONTROL", ch. 05
+"TIMELINE STRUCTURE") and real repository code
+(`execution/clip_manifest.py`, `preflight/validator.py`,
+`render/audio_mix.py`, `render/report.py`, `schema/edit_plan.schema.json`):
+
+- **CE-4e is Human-Assisted QC, not automatic video QC.** The Stage 3
+  manual's own G4 checklist (ch. 13) is entirely a human, watch-the-clip
+  checklist ("주요 피사체의 형태·비례·재질이 클립 전체에서 변하지
+  않았는가", "최종 프레임이 지시된 Settle 위치에 도달하는가", ...) - no
+  item in it is a tool-measurable value, and no OpenCV/CV/ML dependency
+  was added to attempt one.
+- **The only auto-measured facts are `source_duration_ms` and
+  `has_audio_stream`**, both real `ffprobe` container inspection of the
+  actual generated Flow clip, re-implemented independently (never
+  importing `seoulkit_studio` internals, matching the CE-3 boundary
+  principle) the same way `render/report.py::_probe_duration_ms()` already
+  does it in Video Studio. This does not duplicate any existing check:
+  `preflight/validator.py` never calls `ffprobe` at all (confirmed by
+  grep), and `render/report.py`'s own `ffprobe` use is a post-*render*
+  invariant check on the final output, not the raw Flow input clips.
+- **No proportional-timeline auto-suggestion.** The Stage 3 manual's ch.
+  05 percentage structure (0-7%/7-17%/17-27%/27-43%/43-100%) describes
+  what the *generation prompt asked for*, not what the *generated clip
+  actually contains* - CE-4e does not use it to pre-fill
+  `key_event_end_ms`/`settle_start_ms`, even as a "suggested default",
+  since showing one risks a human anchoring their QC judgment to it
+  instead of the real clip. `usable_start_ms` is not defaulted to `0`
+  either, despite that being the overwhelmingly common case.
+- **`camera_behavior` is a human QC input, not a measurement.** Its value
+  is decided during Stage 3's own prompt-authoring chat, but that decision
+  is never captured in any structured file this pipeline produces
+  (`stage3_input.json` is Stage 3's *input*, not its output) - detecting
+  camera movement from pixels would need real computer vision, out of
+  scope. A human re-confirms it directly while doing G4 QC.
+- **Timing invariant (5 rules) is CE-4e's own new data-integrity
+  contract, not a rediscovery of an existing one.** Re-reading
+  `schema/edit_plan.schema.json` confirmed `usable_start_ms`/
+  `usable_end_ms`/`key_event_end_ms`/`settle_start_ms` are each
+  independently nullable, `minimum: 0` integers with no `allOf` relating
+  them to each other or to `source_duration_ms`; `clip_manifest.json`
+  itself has no schema file at all; and `preflight/validator.py::check_time_consistency()`
+  only checks `clip_in_ms`/`clip_out_ms` against the usable range, never
+  the range's own internal consistency. A human-entered
+  `usable_end_ms > source_duration_ms` is caught by **no existing Video
+  Studio code today**. Because CE-4e is the first writer of these facts
+  from a real measured clip, `check_timing_invariants()` adds five rules
+  derived from field semantics and the manual's ch. 05 Hold-before-Settle
+  ordering: `usable_end_ms <= source_duration_ms`; `usable_start_ms <
+  usable_end_ms`; `key_event_end_ms`/`settle_start_ms` each within
+  `[usable_start_ms, usable_end_ms]` when not `None`; `key_event_end_ms <=
+  settle_start_ms` when both not `None`.
+- **`sfx_contract_version=1` is adopted, `optional_source_audio.file` is
+  always `None`.** Declining the contract would silently reopen the exact
+  "SFX candidate silently dropped" gap Video Studio's own team already
+  closed (`execution/clip_manifest.py::check_sfx_contract_resolution()`,
+  wired live into `execution/pipeline.py::evaluate_plan()`, the function
+  the real `preflight` CLI command actually calls). `available` is a real
+  `ffprobe` audio-stream-presence check. `file` is left `None` because
+  re-reading `check_sfx_contract_resolution()` confirmed it never reads
+  `.file` at all, and `render/audio_mix.py::mix_audio()` consumes an
+  entirely different field (`edit_plan.json`'s own, separately-written
+  `audio_layers.sfx_source.clips[].file`, a Stage 4/CE-4f decision) - no
+  code anywhere in this repository defines what `optional_source_audio.file`
+  should contain. CE-4e does not invent a meaning for it; that is left to
+  CE-4f, the phase that will first actually consume an SFX candidate, the
+  same way CE-4c deferred `expected_filename` to CE-4d.
+- **File-existence checking was moved out of the write step.** An earlier
+  draft had `write_clip_manifest()` re-verify that the real Flow clip
+  files exist before writing. This was corrected: existence is confirmed
+  once, by `measure_clips()`, before any human spends time entering QC
+  values for a shot - `write_clip_manifest()` performs no source-clip
+  lookups at all, only the `clips/clip_manifest.json`-already-exists
+  overwrite guard (same principle as CE-4c/CE-4d).
+- **All-or-nothing write, no incremental manifest update.** Every shot's
+  `ShotQcDecision` must have `qc_passed=True` before `clip_manifest.json`
+  is built at all; there is no per-shot revision workflow and no
+  auto-overwrite/backup/versioning if the file already exists.
+- **CE-4e has no knowledge of Voice/TTS/Alignment.** Its sole output is
+  `clips/clip_manifest.json`; CE-4f is left to combine `stage3_input.json`
+  + `clip_manifest.json` + Voice/Alignment into `edit_plan.json`.
+
+## CE-4e: Stage 3 QC Assist
+
+**Files**: new `src/content_engine/video_planning/clip_qc.py`; modified
+`src/content_engine/video_planning/models.py` (new `MeasuredClipFacts`/
+`ShotQcDecision`/`OptionalSourceAudio`/`ClipManifestEntry`/`ClipManifest`),
+`tests/test_ce_video_planning_models.py` (field-shape tests for the five
+new dataclasses); new `tests/test_ce_video_planning_clip_qc.py`. **No
+schema change, no new dependency, no DB change.**
+
+**`measure_clip(shot, clip_path)`**/**`measure_clips(project_dir, stage3_input)`**:
+real `ffprobe` subprocess calls only - `source_duration_ms` (container
+duration) and `has_audio_stream` (audio-stream presence). `measure_clips()`
+resolves each shot's `expected_clip_filename` from `stage3_input.json`,
+collects every missing Flow clip file and raises `MissingClipFileError`
+once with the complete list before measuring anything.
+
+**`check_timing_invariants(shot, decision, source_duration_ms)`**: the
+five-rule numeric-integrity check described above, returning every
+violation for one shot rather than stopping at the first.
+
+**`build_clip_manifest(stage3_input, measured, decisions)`**: merges
+`stage3_input.shots`/`measured`/`decisions` by `shot` identity (pure,
+no filesystem access) - raises `ClipQcIdentityMismatchError`
+(missing/extra/duplicate, all collected) first, then
+`TimingInvariantError` (all shots' violations collected) via
+`check_timing_invariants()`, then `QcNotPassedError` (all failed shots
+listed) if any `qc_passed=False` remains. Only if all three checks pass
+does it build a `ClipManifest` with `sfx_contract_version=1` and
+`optional_source_audio.file=None` on every entry.
+
+**`write_clip_manifest(project_dir, manifest)`**: `FileExistsError` if
+`clips/clip_manifest.json` already exists; otherwise serializes with
+UTF-8 explicit (`encoding="utf-8"`) and writes once. Performs no
+source-clip lookups.
+
+**Testing**: 28 new cases - 6 dataclass field-shape tests (in
+`test_ce_video_planning_models.py`) + 22 in
+`test_ce_video_planning_clip_qc.py`: `measure_clip()` real-`ffprobe`
+duration/audio-presence (2), `measure_clips()` missing-file collection
+and order preservation (3), `check_timing_invariants()`'s five rules
+individually plus the null-allowed and all-valid cases (7),
+`build_clip_manifest()` identity mismatch (3), the all-violations-collected
+case (1), the qc_passed gate (1), the `optional_source_audio.file`-is-always-`None`
+regression (1), a successful merge (1), and `write_clip_manifest()`'s
+exact key shape, overwrite-rejection, and never-touches-source-clip-files
+(3). Full suite: 592/592 passing (394 Video Studio + 9 CE-1 + 66 CE-2A +
+32 CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c + 17 CE-4d + 28 CE-4e), zero
+regressions.
+
+One red/green demonstration was performed before landing, on the phase's
+core new guarantee - the timing invariant nothing else in the frozen
+contract catches. Removed the `usable_end_ms > source_duration_ms` check
+from `check_timing_invariants()` - the exact motivating case (a human
+entering `usable_end_ms=7000` against a real `source_duration_ms=6000`
+clip) is invisible to Video Studio's schema, `preflight`, and
+`execution/clip_manifest.py` alike. Exactly two tests failed -
+`test_check_timing_invariants_usable_end_exceeds_source_duration` ("DID
+NOT RAISE" via an empty violations list) and
+`test_build_clip_manifest_raises_timing_invariant_error_collecting_all_violations`
+(now collecting 1 violation instead of the expected 2) - with the other
+20 `test_ce_video_planning_clip_qc.py` cases (including the other four
+timing rules, identity checks, qc_passed gate, and SFX handling)
+unaffected. Reverted, full suite (592/592) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d
+file, was touched during CE-4e. DB schema unchanged. CE-4f remains
 registered in the phase table as "Not started" - not implemented.
