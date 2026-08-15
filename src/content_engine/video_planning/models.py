@@ -24,11 +24,23 @@ content, no clip duration, and no top-level style-anchor field - Stage
 3's own manual does not list a separate style-anchor input; the approved
 keyframe already carries whatever style consistency Stage 2 established.
 See `stage3_input.py`'s module docstring for the full reasoning.
+
+`MeasuredClipFacts`/`ShotQcDecision`/`OptionalSourceAudio`/
+`ClipManifestEntry`/`ClipManifest` (CE-4e): the Human-Assisted Stage 3 QC
+shapes. `MeasuredClipFacts` is the only auto-measured data (ffprobe on the
+real Flow clip); every other per-shot judgment
+(`usable_start_ms`/`usable_end_ms`/`key_event_end_ms`/`settle_start_ms`/
+`camera_behavior`/`qc_passed`) is a `ShotQcDecision` a human supplies after
+watching the clip against the Stage 3 manual's G4 checklist - none of it
+is inferred from pixels or from the Stage 3 manual's proportional timeline
+structure. See `clip_qc.py`'s module docstring for the full reasoning,
+including why `OptionalSourceAudio.file` is always `None` in this phase.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 @dataclass
@@ -76,3 +88,46 @@ class Stage3InputPackage:
     schema_version: str
     topic: str
     shots: list[Stage3PlannedShot]
+
+
+@dataclass
+class MeasuredClipFacts:
+    shot: str
+    source_duration_ms: int
+    has_audio_stream: bool
+
+
+@dataclass
+class ShotQcDecision:
+    shot: str
+    usable_start_ms: int
+    usable_end_ms: int
+    key_event_end_ms: int | None
+    settle_start_ms: int | None
+    camera_behavior: Literal["movement", "locked-off"]
+    qc_passed: bool
+
+
+@dataclass
+class OptionalSourceAudio:
+    available: bool
+    file: str | None
+
+
+@dataclass
+class ClipManifestEntry:
+    shot: str
+    file: str
+    camera_behavior: str
+    source_duration_ms: int
+    usable_start_ms: int
+    usable_end_ms: int
+    key_event_end_ms: int | None
+    settle_start_ms: int | None
+    optional_source_audio: OptionalSourceAudio
+
+
+@dataclass
+class ClipManifest:
+    sfx_contract_version: int
+    clips: list[ClipManifestEntry]
