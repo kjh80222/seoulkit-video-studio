@@ -1,5 +1,10 @@
 from content_engine.video_planning.models import (
+    ClipManifest,
+    ClipManifestEntry,
+    MeasuredClipFacts,
+    OptionalSourceAudio,
     PlannedShot,
+    ShotQcDecision,
     Stage2InputPackage,
     Stage2ShotOutput,
     Stage3InputPackage,
@@ -70,3 +75,64 @@ def test_stage3_input_package_holds_exactly_schema_version_topic_shots():
     assert package.schema_version == "1.0"
     assert package.topic == "test topic"
     assert package.shots == []
+
+
+def test_measured_clip_facts_holds_exactly_the_expected_fields():
+    facts = MeasuredClipFacts(shot="1A", source_duration_ms=6000, has_audio_stream=True)
+
+    for forbidden in ("usable_start_ms", "usable_end_ms", "camera_behavior", "qc_passed"):
+        assert not hasattr(facts, forbidden)
+
+    assert facts.shot == "1A"
+    assert facts.source_duration_ms == 6000
+    assert facts.has_audio_stream is True
+
+
+def test_shot_qc_decision_holds_exactly_the_expected_fields():
+    decision = ShotQcDecision(
+        shot="1A", usable_start_ms=0, usable_end_ms=5800, key_event_end_ms=4200,
+        settle_start_ms=4800, camera_behavior="movement", qc_passed=True,
+    )
+
+    for forbidden in ("source_duration_ms", "has_audio_stream"):
+        assert not hasattr(decision, forbidden)
+
+    assert decision.camera_behavior == "movement"
+    assert decision.qc_passed is True
+    assert decision.key_event_end_ms == 4200
+
+
+def test_shot_qc_decision_allows_null_key_event_end_and_settle_start():
+    decision = ShotQcDecision(
+        shot="1A", usable_start_ms=0, usable_end_ms=5800, key_event_end_ms=None,
+        settle_start_ms=None, camera_behavior="locked-off", qc_passed=True,
+    )
+
+    assert decision.key_event_end_ms is None
+    assert decision.settle_start_ms is None
+
+
+def test_optional_source_audio_holds_exactly_available_and_file():
+    audio = OptionalSourceAudio(available=True, file=None)
+
+    assert audio.available is True
+    assert audio.file is None
+
+
+def test_clip_manifest_entry_holds_exactly_the_expected_fields():
+    entry = ClipManifestEntry(
+        shot="1A", file="clips/shot_1a_flow.mp4", camera_behavior="movement",
+        source_duration_ms=6000, usable_start_ms=0, usable_end_ms=5800,
+        key_event_end_ms=4200, settle_start_ms=4800,
+        optional_source_audio=OptionalSourceAudio(available=False, file=None),
+    )
+
+    assert entry.file == "clips/shot_1a_flow.mp4"
+    assert entry.optional_source_audio.available is False
+
+
+def test_clip_manifest_holds_exactly_sfx_contract_version_and_clips():
+    manifest = ClipManifest(sfx_contract_version=1, clips=[])
+
+    assert manifest.sfx_contract_version == 1
+    assert manifest.clips == []
