@@ -35,11 +35,25 @@ watching the clip against the Stage 3 manual's G4 checklist - none of it
 is inferred from pixels or from the Stage 3 manual's proportional timeline
 structure. See `clip_qc.py`'s module docstring for the full reasoning,
 including why `OptionalSourceAudio.file` is always `None` in this phase.
+
+CE-4f's dataclasses split cleanly into two families, never conflated:
+Human* (`HumanVoiceTimingInput`/`HumanSemanticSyncSegment`/
+`HumanOverlayDecision`/`HumanSfxDecision`) are what a human supplies -
+Voice/alignment grade, Semantic Sync timeline+clip selection, overlay
+position/timing, and SFX adopt/discard decisions. EditPlan* (`EditPlanVoice`/
+`EditPlanSegment`/`EditPlanOverlay`/`EditPlanSubtitle`/`EditPlanSfxClip`/
+`EditPlanSfxSource`/`EditPlanBgm`/`EditPlanAudioLayers`/`EditPlanWarning`/
+`EditPlan`) mirror the frozen `edit_plan.schema.json` shape field-for-field
+- a human input dataclass is never serialized directly; `edit_plan.py`
+converts Human* + `stage2_input.json`/`stage3_input.json`/`clip_manifest.json`
+into EditPlan* before writing. See `edit_plan.py`'s module docstring for
+the full reasoning, including why `EditPlanSfxClip.file` is `""` for a
+discarded candidate.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -131,3 +145,135 @@ class ClipManifestEntry:
 class ClipManifest:
     sfx_contract_version: int
     clips: list[ClipManifestEntry]
+
+
+@dataclass
+class HumanVoiceTimingInput:
+    timing_grade: Literal["EXACT", "AUDIO_BASED", "ESTIMATED"]
+    audio_file: str | None
+    total_duration_ms: int | None
+
+
+@dataclass
+class HumanSemanticSyncSegment:
+    shot: str
+    start_ms: int
+    end_ms: int
+    clip_in_ms: int
+    clip_out_ms: int
+
+
+@dataclass
+class HumanOverlayDecision:
+    shot: str
+    position_preset: str
+    start_ms: int
+    end_ms: int
+
+
+@dataclass
+class HumanSfxDecision:
+    shot: str
+    action: Literal["adopted", "discarded"]
+    file: str | None
+
+
+@dataclass
+class EditPlanVoice:
+    audio_file: str | None
+    aligned: bool
+    total_duration_ms: int
+
+
+@dataclass
+class EditPlanSegment:
+    beat: int
+    shot: str
+    start_ms: int
+    end_ms: int
+    timing_grade: str
+    source_clip: str
+    source_duration_ms: int
+    usable_start_ms: int
+    usable_end_ms: int
+    key_event_end_ms: int | None
+    settle_start_ms: int | None
+    clip_in_ms: int
+    clip_out_ms: int
+    camera_behavior: str
+    hold_strategy: str
+    hold_ms: int
+    trim_reason: str | None
+    voice_text: str
+    status: str
+    status_note: str | None
+
+
+@dataclass
+class EditPlanOverlay:
+    beat: int
+    text: str
+    type: str
+    start_ms: int
+    end_ms: int
+    position_preset: str
+    position_override: None
+    source: str
+
+
+@dataclass
+class EditPlanSubtitle:
+    beat: int
+    start_ms: int
+    end_ms: int
+    lines: list[str]
+    position_preset: str
+    timing_grade: str
+
+
+@dataclass
+class EditPlanSfxClip:
+    shot: str
+    file: str
+    action: Literal["adopted", "discarded"]
+
+
+@dataclass
+class EditPlanSfxSource:
+    mode: Literal["stage3_optional", "none"]
+    clips: list[EditPlanSfxClip]
+
+
+@dataclass
+class EditPlanBgm:
+    mode: Literal["selected", "none"] = "none"
+    file: str | None = None
+    reference_db: float | None = None
+
+
+@dataclass
+class EditPlanAudioLayers:
+    voice: str
+    sfx_source: EditPlanSfxSource
+    bgm: EditPlanBgm
+
+
+@dataclass
+class EditPlanWarning:
+    code: str
+    message: str
+    severity: Literal["info", "warning", "blocking"]
+    segment_ref: str | None = None
+
+
+@dataclass
+class EditPlan:
+    project: str
+    status: str
+    timing_grade_default: str
+    voice: EditPlanVoice
+    segments: list[EditPlanSegment]
+    overlays: list[EditPlanOverlay]
+    subtitles: list[EditPlanSubtitle]
+    audio_layers: EditPlanAudioLayers
+    warnings: list[EditPlanWarning] = field(default_factory=list)
