@@ -29,6 +29,51 @@ def test_job_dataclass_holds_exactly_the_expected_fields():
     assert job.error_message is None
     assert job.started_at is None
     assert job.completed_at is None
+    assert job.content_package_id is None
+    assert job.payload is None
+
+
+def test_job_round_trips_content_package_id_and_payload(tmp_path):
+    conn = get_connection(tmp_path / "content_engine.db")
+    conn.execute(
+        "INSERT INTO content_packages (id, topic, project_dir, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        ("pkg-1", "topic", "/tmp/pkg-1", "2026-08-13T00:00:00+00:00", "2026-08-13T00:00:00+00:00"),
+    )
+    conn.commit()
+
+    original = Job(
+        id="job-1",
+        job_type="stage2_input_build",
+        state=JobState.PENDING,
+        created_at="2026-08-13T00:00:00+00:00",
+        updated_at="2026-08-13T00:00:00+00:00",
+        content_package_id="pkg-1",
+        payload='{"shot": "1A"}',
+    )
+
+    conn.execute(
+        """
+        INSERT INTO jobs (id, job_type, state, created_at, updated_at, content_package_id, payload)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            original.id, original.job_type, original.state.value, original.created_at, original.updated_at,
+            original.content_package_id, original.payload,
+        ),
+    )
+    conn.commit()
+
+    row = conn.execute(
+        "SELECT id, job_type, state, created_at, updated_at, content_package_id, payload FROM jobs WHERE id = ?",
+        (original.id,),
+    ).fetchone()
+
+    restored = Job(
+        id=row[0], job_type=row[1], state=JobState(row[2]), created_at=row[3], updated_at=row[4],
+        content_package_id=row[5], payload=row[6],
+    )
+
+    assert restored == original
 
 
 def test_job_round_trips_through_raw_sql_insert_and_select(tmp_path):
