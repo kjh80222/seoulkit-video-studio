@@ -1,4 +1,5 @@
 from content_engine.video_planning.models import (
+    BeatRow,
     ClipManifest,
     ClipManifestEntry,
     EditPlan,
@@ -19,6 +20,8 @@ from content_engine.video_planning.models import (
     OptionalSourceAudio,
     PlannedShot,
     ShotQcDecision,
+    ShotRow,
+    Stage1BeatShotTable,
     Stage2InputPackage,
     Stage2ShotOutput,
     Stage3InputPackage,
@@ -246,3 +249,27 @@ def test_edit_plan_holds_exactly_the_expected_fields():
 
     assert plan.warnings == []
     assert plan.status == "REVIEW_REQUIRED"
+
+
+def test_beat_row_holds_exactly_the_expected_fields():
+    row = BeatRow(beat=1, narration="In 1953, Seoul was mostly rubble.",
+                   visual_purpose="Establish scale of destruction", screen_number="1953", screen_label=None)
+
+    assert row.beat == 1
+    assert row.narration == "In 1953, Seoul was mostly rubble."
+    assert not hasattr(row, "shot")
+
+
+def test_shot_row_holds_exactly_the_expected_fields():
+    row = ShotRow(shot="1A", beat=1, shot_type="wide", on_screen_text="1953")
+
+    assert row.shot == "1A"
+    assert not hasattr(row, "narration")
+    assert not hasattr(row, "visual_purpose")
+
+
+def test_stage1_beat_shot_table_holds_exactly_beats_and_shots():
+    table = Stage1BeatShotTable(beats=[], shots=[])
+
+    assert table.beats == []
+    assert table.shots == []
