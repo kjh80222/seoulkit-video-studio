@@ -22,7 +22,8 @@ exists at all.
 | CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | ✅ Done |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | ✅ Done |
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
-| CE-5 | Google Flow human checkpoint (`AWAITING_HUMAN_ASSET` job state) | Not started |
+| CE-4c | Video Planning / Flow Handoff Package (`edit_plan.json` + Google Flow prompt generated together from one shared internal plan; expected filename/clip id/duration decided once, not re-derived twice) | Not started |
+| CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
 | CE-6 | Video Studio invocation wiring (preflight → preview → render via CE-3) | Not started |
 | CE-7 | Metadata generation (LLM-based title/description/tags) | Not started |
 | CE-8 | Scheduler (publish date/time calculation) | Not started |
@@ -504,3 +505,133 @@ all other files unaffected. Reverted, full suite (527/527) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3 file, was touched during
 CE-4a. `jobs` table definition unchanged.
+
+## Architecture Freeze Review (before CE-5 implementation)
+
+A real-repository investigation preceded this phase (see the git history
+around this section for the full report). Three findings shaped CE-5's
+scope down to something much narrower than its original description:
+
+- **`preflight` never decodes media.** `preflight/validator.py::check_file_existence()`
+  only calls `.is_file()` - no `ffprobe`/`subprocess` call exists anywhere
+  under `preflight/` or `execution/` (confirmed by a full-repo grep). A
+  corrupt or truncated clip passes `preflight` cleanly and only fails
+  later, at actual render time, as `EXECUTION_FAILED`. CE-5 does **not**
+  add its own `ffprobe` check to compensate - doing so would open a
+  second, independent media-validation path outside the
+  Content-Engine-to-CE-3-to-Video-Studio-CLI boundary, one that could
+  silently drift from `preflight` if Video Studio's own validation is
+  ever strengthened later. This is recorded here as a known Video Studio
+  gap, not fixed at the Content Engine layer.
+- **The sole source of truth for "which Flow clips are required" is
+  `edit_plan.json`'s `segments[].source_clip`.** `clips/clip_manifest.json`
+  never introduces a requirement on its own - it only cross-validates
+  timing fields for shots `edit_plan.json` already references
+  (`execution/clip_manifest.py`, confirmed by reading it directly). No
+  code anywhere in this repository produces `edit_plan.json` - CE-4a
+  deliberately doesn't, and CE-4b (Topic/Research) is scoped narrowly to
+  Stage 1 (research), not Stage 2 (segment/timing planning). This is a
+  genuine, still-open architecture gap, not something CE-5 absorbs.
+- **A new phase, CE-4c ("Video Planning / Flow Handoff Package"), is
+  registered in the phase table above to eventually close that gap** -
+  producing `edit_plan.json` and the human-facing Google Flow prompt
+  *together*, from one shared internal plan, so that values both outputs
+  need (expected filename, clip id, target duration) are decided exactly
+  once rather than independently re-derived in two places. CE-4c is
+  **not implemented in this phase** - only registered as "Not started".
+  CE-5 remains fully buildable and testable without it, the same way
+  CE-3's own tests already do: by hand-authoring `edit_plan.json`
+  directly in test fixtures.
+- **`clips/clip_manifest.json`'s real content (measured usable ranges)
+  can only be produced by inspecting real Flow clips after a human has
+  generated them** - it is Stage 3 QC's responsibility per the file's own
+  header comment (`"OWNER: Stage 3 QC, written at G4 pass time"`), and no
+  phase in this roadmap owns Stage 3 QC automation yet. This remains an
+  explicit, unassigned gap - CE-5 does not absorb it either.
+
+Two scope-narrowing decisions were then made in review, before any CE-5
+code was written:
+
+1. **`AWAITING_HUMAN_ASSET` is not added to `JobState` in this phase.**
+   Nothing would ever produce it - CE-2B (the only thing that could pause
+   a running `Job` on a missing asset) doesn't exist, and CE-5 itself
+   creates no `Job`. Adding an unused enum value/transition would repeat
+   the exact pattern CE-1 and CE-4a already rejected for
+   `jobs.content_package_id` and `ContentPackage.status`. `jobs/transitions.py`
+   is therefore untouched by CE-5.
+2. **CE-5's `ready=False` condition is limited to exactly `MISSING_CLIP`
+   plus `edit_plan.json` load failure.** An earlier draft also included
+   `MISSING_VOICE_ASSET`/`MISSING_BGM_FILE`/`MISSING_SFX_FILE` (all real
+   `preflight` issue codes), but review caught that this quietly expanded
+   CE-5 from "did the human supply the Google Flow clips" into "is
+   everything needed for Final Render present" - a different, larger
+   responsibility that isn't this phase's to own (Voice/BGM/SFX are each
+   some other Stage's asset, not a Flow clip). `CLIP_MANIFEST_MISSING`
+   was excluded for the same reason one review round earlier: it's
+   Video Studio's own non-blocking warning, and CE-5 does not promote it
+   to a blocker Video Studio itself doesn't consider one.
+
+## CE-5: Human Asset Intake / Google Flow Handoff
+
+**Files**: new `src/content_engine/content_packages/readiness.py`; new
+`tests/test_ce_content_packages_readiness.py`. **No schema change, no new
+dependency, no `JobState`/`jobs/transitions.py` change.**
+
+**Scope**: exactly two questions - *can the required Google Flow clips be
+determined at all* (`edit_plan.json` must exist and load), and *are they
+all present* (no `MISSING_CLIP` issue in `preflight`'s output). Nothing
+else `preflight` reports (`MISSING_VOICE_ASSET`, `MISSING_BGM_FILE`,
+`MISSING_SFX_FILE`, `CLIP_MANIFEST_MISSING`, or any plan/QC-consistency
+code) affects CE-5's verdict - Video Studio's own `preflight` output still
+carries all of them untouched; CE-5 simply has no opinion on them. CE-5
+writes nothing to `clips/` - a human places Flow clips there directly,
+exactly as the existing workspace convention (CE-4a) already expects.
+
+**`AssetReadinessResult(ready, missing)`** (`content_packages/readiness.py`):
+a plain Result dataclass, not a new state machine. `check_asset_readiness(project_dir)`
+calls CE-3's `run_preflight(project_dir)` unmodified and re-interprets its
+`payload` - never re-implementing any check Video Studio already performs.
+`payload["load_error"]` set (edit_plan.json missing/invalid) and any
+`MISSING_CLIP` issue are the only two conditions that produce
+`ready=False`. A `preflight` call that itself fails to run
+(`result.ok is False` - `USAGE_ERROR`/`ADAPTER_INVOCATION_ERROR`) is not
+swallowed into `ready=False`: it re-raises as a plain `RuntimeError`
+carrying `category`/`exit_code`/`stderr`, keeping "the human hasn't
+supplied a clip yet" clearly distinct from "the system itself is broken".
+
+**Testing**: 11 new cases, all filesystem-only (Video Studio's `preflight`
+only checks file existence, so no real FFmpeg-encoded media is needed -
+empty placeholder files suffice) - `edit_plan.json` missing (1),
+one/multiple `MISSING_CLIP` (2), Voice/BGM/SFX/`CLIP_MANIFEST_MISSING`
+each missing alone still `ready=True` (4), all four missing
+*simultaneously* with every clip present still `ready=True` (1, the
+scope-narrowing decision's direct proof), a fully clean project (1),
+idempotent re-invocation (1), and an `AdapterResult(ok=False, ...)`
+producing a `RuntimeError` carrying `category`/`exit_code`/`stderr` (1).
+Full suite: 538/538 passing (394 Video Studio + 9 CE-1 + 66 CE-2A + 32
+CE-3 + 26 CE-4a + 11 CE-5), zero regressions.
+
+One red/green demonstration was performed before landing, reproducing
+the exact scope-widening this review caught: added `CLIP_MANIFEST_MISSING`
+back into `_ASSET_ISSUE_CODES` (a real reversion of the just-made
+decision). 7 of the 11 new tests failed -
+`test_missing_clip_manifest_alone_is_still_ready` directly (asserted
+`ready is True`, got `False`), plus 6 others
+(`test_one_missing_clip_is_not_ready`,
+`test_multiple_missing_clips_are_all_reported`,
+`test_missing_voice_alone_is_still_ready`,
+`test_missing_bgm_alone_is_still_ready`,
+`test_missing_sfx_alone_is_still_ready`, and
+`test_voice_bgm_sfx_and_clip_manifest_all_missing_together_is_still_ready`)
+that never write `clips/clip_manifest.json` in their own fixtures at all
+(it was never needed once the file's absence was confirmed non-blocking) -
+each unexpectedly flipped to `ready=False` too. This turned out to be a
+more convincing demonstration than a single-test failure would have been:
+it shows concretely how many of CE-5's own fixtures silently depend on
+`CLIP_MANIFEST_MISSING` staying excluded, not just the one test written
+to name that fact directly. The other 4 cases and all other files were
+unaffected. Reverted, full suite (538/538) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a file, was touched
+during CE-5. `jobs` table and `JobState` unchanged. CE-4c remains
+registered in the phase table as "Not started" - not implemented.
