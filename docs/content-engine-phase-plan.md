@@ -21,7 +21,7 @@ exists at all.
 | CE-2B | Single worker / queue execution (worker loop, queue polling, pause/resume/stop/cancel *enforcement*, crash recovery, retry) | Not started |
 | CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | ✅ Done |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | ✅ Done |
-| CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
+| CE-4b | Topic/Research / Stage 1 Producer (`stage1_beat_shot_table.json` -> `list[PlannedShot]`; Human + LLM assisted, no LLM API/web research call from Content Engine) | ✅ Done |
 | CE-4c | Stage 1 → Stage 2 Handoff Package (`stage2_input.json` - Stage 1 content data only, no Stage 2/3/4 creative or measured values) | ✅ Done |
 | CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json` - merges CE-4c's Stage 1 data with Stage 2's structured output by shot identity; `expected_clip_filename()` first computed/consumed here) | ✅ Done |
 | CE-4e | Stage 3 QC Assist (`clip_manifest.json` - Human-Assisted QC, not automatic video QC; `sfx_contract_version=1` adopted) | ✅ Done |
@@ -1149,3 +1149,145 @@ Reverted, full suite (654/654) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
 CE-4e file, was touched during CE-4f. DB schema unchanged.
+
+## Architecture Freeze Review (before CE-4b implementation)
+
+A dedicated investigation round (following a broader "what should Content
+Engine build next" review that confirmed CE-4c through CE-4f are all
+complete and independently working, but nothing produces the very first
+input `stage2_input.json`'s underlying `list[PlannedShot]` needs) was
+grounded in the Stage 1 manual (`SEOULKIT_Stage1_MINI_Script_System_v2.0`)
+and the real `examples/sample-project/script/stage1_beat_shot_table.json`/
+`stage1_script.md` example files:
+
+- **CE-4b is Human + LLM assisted, matching Stage 2/3/4's already-locked
+  precedent, not a new automated pipeline.** The Stage 1 manual's own
+  copy-paste master prompt (sec. 18) is self-contained and designed to run
+  inside a human's own ChatGPT/Claude chat, with multiple explicit
+  "STOP and wait" points (topic category, title selection, length
+  confirmation, script-before-beats). An earlier framing compared this
+  against a "fully automated topic->research->LLM script->PlannedShot"
+  alternative; review rejected it because it would introduce this
+  project's first LLM provider dependency, first API credential (contrary
+  to CE-1's own freeze review, which put credential-store need no earlier
+  than CE-9a), and first non-deterministic external call, none of which
+  any other CE-4 phase needed.
+- **The real Stage 1 output is two normalized tables, not a flat list.**
+  Cross-checking the Stage 1 manual's own machine-readable field mapping
+  (sec. 17-1) against the real `stage1_beat_shot_table.json` example
+  confirmed `beats[]` (`beat`/`visual_purpose`/`screen_number`/
+  `screen_label`) and `shots[]` (`shot`/`beat`/`shot_type`/
+  `on_screen_text`) as two separate, `beat`-joined tables - CE-4c's
+  already-frozen `PlannedShot` is the *denormalized* join of these two,
+  not Stage 1's own native shape. `BeatRow`/`ShotRow` were modeled
+  directly on the two real tables; `build_planned_shots()` performs the
+  join.
+- **`PlannedShot.voice_text` has no source in Stage 1's own official
+  mapping.** Sec. 17-1 explicitly marks the Beat table's Narration column
+  "reference only" and states `edit_plan.json`'s `voice_text` should be
+  "derived from the actual Voice" instead - i.e. Stage 4's job, once real
+  TTS exists. Since CE-4f v1 was deliberately built without TTS/alignment
+  (see its own Freeze Review above), and `PlannedShot.voice_text` is
+  already a required, frozen field with no other candidate source,
+  `BeatRow.narration` was added as CE-4b's own extension beyond the
+  manual's strict mapping - documented explicitly as **provisional** text,
+  not a final Voice-derived truth.
+- **Narration is never split per shot.** The Stage 1 manual describes a
+  beat's ~10 seconds of narration becoming Shot A + Shot B without
+  specifying where the words divide; the Stage 4 manual's own Semantic
+  Sync principle (ch. 06) explicitly assigns that word-level boundary
+  decision to CE-4f. `build_planned_shots()` copies the same beat-level
+  narration unchanged onto every shot in that beat instead.
+- **`project_dir/script/stage1_beat_shot_table.json` was adopted as a new
+  workspace convention** (parallel to `clips/`/`keyframes/`) rather than
+  requiring a caller to hand-construct `BeatRow`/`ShotRow` objects in
+  Python - matching the real example file's own location and shape.
+- **Four structural gaps were caught and closed in the review round that
+  approved implementation**, all before any code was written:
+  1. An earlier draft's test plan called for "collecting violations
+     across different categories into one exception" while the exception
+     design kept them separate - resolved by fixing category order
+     (missing file -> malformed shape -> duplicate identity -> shot/beat
+     ID consistency -> orphan shot -> invalid `shot_type` -> on-screen-text
+     mismatch -> duplicate overlay), each category collecting only its own
+     violations, never aggregated across categories, and no generic
+     aggregate-validation framework built to support it.
+  2. `BeatRow(**row)`/`ShotRow(**row)` on a malformed JSON row would have
+     let a raw Python `TypeError`/`ValueError` escape uncaught - closed by
+     a thin, explicit shape check (`beats`/`shots` are lists, each row is
+     an object, exact required/extra field sets) before construction,
+     converting every such issue into `MalformedStage1InputError`.
+  3. **Duplicate `beat`/`shot` IDs were not validated at all** in the
+     first draft - `{b.beat: b for b in table.beats}` would have let a
+     later duplicate silently overwrite an earlier one with no trace, the
+     same class of silent-corruption risk CE-4d/CE-4e's own identity
+     checks were built to prevent. `DuplicateStage1IdentityError` closes
+     this before the join dict is ever built.
+  4. **Shot ID / `beat` field consistency was not checked** - a shot like
+     `{"shot": "1A", "beat": 2}` would have passed as long as beat 2
+     existed somewhere. `ShotBeatIdMismatchError` now verifies every
+     shot's ID matches the Stage 1 manual's own `{beat}{LETTER+}`
+     convention (sec. 13) and that its numeric prefix equals its own
+     `beat` field.
+
+## CE-4b: Topic / Research / Stage 1 Producer
+
+**Files**: new `src/content_engine/video_planning/stage1_input.py`;
+modified `src/content_engine/video_planning/models.py` (new `BeatRow`/
+`ShotRow`/`Stage1BeatShotTable`), `tests/test_ce_video_planning_models.py`
+(field-shape tests for the three new dataclasses); new
+`tests/test_ce_video_planning_stage1_input.py`. **No schema change, no new
+dependency, no DB change, no LLM/web-search call anywhere in this module.**
+
+**`read_stage1_beat_shot_table(project_dir)`**: reads
+`project_dir/script/stage1_beat_shot_table.json`, converting every
+structural problem (missing file, invalid JSON, `beats`/`shots` not
+lists, a row that isn't an object, missing/extra fields, dataclass
+construction failure) into `MissingStage1InputError`/
+`MalformedStage1InputError` - no raw `TypeError`/`ValueError` escapes.
+
+**`build_planned_shots(table)`**: fixed, non-aggregated validation order
+(duplicate beat/shot identity -> shot ID/`beat` consistency -> orphan
+shots -> invalid `shot_type` -> `on_screen_text` mismatch -> duplicate
+overlay-per-beat), each category collecting every violation of its own
+kind before raising, described in full in the module docstring. Only
+after all six categories pass does it join `beats[]`/`shots[]` by `beat`
+into `list[PlannedShot]`, copying `visual_purpose`/`screen_number`/
+`screen_label` from each shot's beat and duplicating that beat's
+`narration` unchanged into every one of its shots' `voice_text`.
+
+**CE-4c integration**: `build_planned_shots()`'s output is passed directly
+into CE-4c's existing, unmodified `build_stage2_input(topic, shots)` -
+CE-4b never writes `stage2_input.json` itself.
+
+**Testing**: 30 new cases - 3 dataclass field-shape tests (in
+`test_ce_video_planning_models.py`) + 27 in
+`test_ce_video_planning_stage1_input.py`: `read_stage1_beat_shot_table()`
+missing/malformed-JSON/wrong-shape/missing-field/extra-field cases plus
+multi-row collection and the real example shape (9), duplicate
+beat/shot identity single+combined (3), shot/beat ID mismatch
+single+multiple (2), orphan shot single+multiple (2), invalid
+`shot_type` single+multiple (2), `on_screen_text` mismatch
+single+multiple (2), duplicate overlay-per-beat (1), normal-path
+order/copy/duplication/null-handling behavior (4), a real integration
+test feeding `build_planned_shots()`'s output through CE-4c's
+`build_stage2_input()`/`write_stage2_input()` unmodified (1), and a
+Korean/UTF-8 round-trip (1). Full suite: 684/684 passing (394 Video
+Studio + 9 CE-1 + 66 CE-2A + 32 CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c + 17
+CE-4d + 28 CE-4e + 62 CE-4f + 30 CE-4b), zero regressions.
+
+One red/green demonstration was performed before landing, on the
+duplicate-identity guard specifically flagged in review as the phase's
+most important guarantee - a silent dict-join corruption risk, not merely
+a missing-file inconvenience. Removed the duplicate beat/shot check from
+`build_planned_shots()`. Exactly three tests failed -
+`test_build_raises_on_duplicate_beat_id`,
+`test_build_raises_on_duplicate_shot_id`, and
+`test_build_raises_on_duplicate_beat_and_shot_id_together` (all "DID NOT
+RAISE") - and, confirmed by inspection, the function no longer raised at
+all on duplicate input, silently letting the last duplicate beat/shot win
+the join instead. The other 24 `test_ce_video_planning_stage1_input.py`
+cases were unaffected. Reverted, full suite (684/684) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
+CE-4e/CE-4f file, was touched during CE-4b. DB schema unchanged.
