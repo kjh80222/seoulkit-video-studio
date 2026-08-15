@@ -22,7 +22,10 @@ exists at all.
 | CE-3 | Video Studio Adapter (the only module allowed to shell out to `seoulkit-studio`) | ✅ Done |
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | ✅ Done |
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
-| CE-4c | Video Planning / Flow Handoff Package (`edit_plan.json` + Google Flow prompt generated together from one shared internal plan; expected filename/clip id/duration decided once, not re-derived twice) | Not started |
+| CE-4c | Stage 1 → Stage 2 Handoff Package (`stage2_input.json` - Stage 1 content data only, no Stage 2/3/4 creative or measured values) | ✅ Done |
+| CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json`, built from Stage 2's actual output once it exists - approved keyframe reference, Story Function, Continuity, and where `expected_filename()` is first computed/consumed) | Not started |
+| CE-4e | Stage 3 QC Assist (`clip_manifest.json` - measuring real Flow clips, Stage 3 QC's responsibility per the file's own header comment) | Not started |
+| CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Stage 5 remains a read-only consumer) | Not started |
 | CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
 | CE-6 | Video Studio invocation wiring (preflight → preview → render via CE-3) | Not started |
 | CE-7 | Metadata generation (LLM-based title/description/tags) | Not started |
@@ -634,4 +637,105 @@ unaffected. Reverted, full suite (538/538) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a file, was touched
 during CE-5. `jobs` table and `JobState` unchanged. CE-4c remains
+registered in the phase table as "Not started" - not implemented.
+
+## Architecture Freeze Review (before CE-4c implementation)
+
+CE-4c's scope was investigated and narrowed across several review rounds,
+grounded in two source documents outside this repository -
+`SEOULKIT_Stage2_MINI_Image_Prompt_Manual_v2.0` and
+`SEOULKIT_Stage3_MINI_Video_Prompt_Manual_v2.0` - read directly rather
+than assumed. Reading them corrected an entire earlier draft:
+
+- **CE-4c does not produce `edit_plan.json`.** An early draft had CE-4c
+  write a draft `edit_plan.json` for Stage 4 to later revise - a genuine
+  dual-ownership violation of the Stage 4/5 contract ("Stage 4 produces,
+  Stage 5 only reads"). `edit_plan.json` production was moved entirely to
+  a new, not-yet-implemented CE-4f.
+- **`story_function`/`continuity`/style-anchor selection are Stage 2's own
+  output, not Stage 1's.** The Stage 3 manual's own pipeline table
+  confirms this directly ("Stage 2에서 읽는 것: ... Story Function,
+  Continuity intent" - produced by Stage 2 alongside its keyframe image
+  prompts). An earlier `PlannedShot` draft wrongly modeled these as CE-4c
+  inputs.
+- **`camera_behavior` is Stage 3's own creative decision** (chosen from a
+  defined camera-move palette based on each shot's Story Function, per
+  the Stage 3 manual), not something CE-4c can predetermine before Stage
+  2 has even produced the images Stage 3 works from.
+- **Clip duration is not a per-shot creative value at all.** The Stage 3
+  manual is explicit: `CLIP_DURATION = duration actually
+  produced/supported by the selected generation mode` - a property of
+  whichever Flow/Veo mode is in use, not something a shot planner
+  chooses. An earlier `flow_target_duration_ms` field was removed
+  entirely.
+- **Stage 2 and Stage 3 are two separate, sequential human+LLM-chat
+  loops**, each already fully specified by its own manual's
+  copy-paste-into-an-LLM-chat master prompt - Stage 3 cannot even begin
+  until Stage 2's output (approved images + Story Function + Continuity)
+  exists. This is why the phase table now has CE-4c (Stage 1 → Stage 2)
+  and CE-4d (Stage 2 → Stage 3) as two separate phases rather than one -
+  no single CE-4c invocation has both halves' data available at once.
+- **The Stage 2 manual's `MASTER STYLE BLOCK`/`NEGATIVE BLOCK` are fixed
+  manual text, not Stage 1 content.** Copying them into every project's
+  JSON (and into a Content Engine constant, verified against the manual
+  by a string-equality test) would create a second source of truth
+  alongside the manual itself. CE-4c carries none of this text - whoever
+  runs Stage 2 uses the official manual directly.
+- **`expected_filename` is a pure, deterministic function of `beat`/
+  `shot`** (`shot="1A"` → `clips/shot_1a_flow.mp4`, matching the existing
+  `clips/README.md` convention) - but it is computed nowhere in CE-4c.
+  Stage 2 never reads it, so precomputing and storing it now would be a
+  derived value with no consumer, sitting in a file that could drift from
+  the naming rule if that rule ever changed. It is deferred to CE-4d,
+  where it is first actually needed and consumed.
+
+What survived every round of narrowing: CE-4c carries **only Stage 1
+content data** - `topic` and, per shot, `beat`/`shot`/`shot_type`/
+`visual_purpose`/`screen_number`/`screen_label`/`on_screen_text`/
+`voice_text`. Nothing else.
+
+## CE-4c: Stage 1 → Stage 2 Handoff Package
+
+**Files**: new `src/content_engine/video_planning/{__init__.py,models.py,stage2_input.py}`;
+new `tests/test_ce_video_planning_{models,stage2_input}.py`. **No schema
+change, no new dependency, no DB change** - this phase writes exactly one
+plain file into an already-existing workspace.
+
+**`PlannedShot`/`Stage2InputPackage`** (`video_planning/models.py`): pure
+data shape, no persistence methods, matching CE-1's `Job`/CE-4a's
+`ContentPackage` precedent.
+
+**`write_stage2_input(project_dir, package)`** (`video_planning/stage2_input.py`):
+writes `project_dir/stage2_input.json` with UTF-8 explicit
+(`encoding="utf-8"`) - `voice_text`/`visual_purpose` are expected to
+carry Korean text, and the eventual production environment is Windows,
+where the platform-default text encoding is not UTF-8. If
+`stage2_input.json` already exists, raises a plain `FileExistsError`
+(matching CE-2A's stdlib-exception precedent) rather than overwriting it
+- a human may have already started a Stage 2 conversation from the
+existing file's content, and silently replacing it could orphan that
+work. No auto-overwrite, backup, or versioning was built for this case.
+
+**Testing**: 9 new cases, all filesystem-only (no FFmpeg, no DB) -
+`PlannedShot`/`Stage2InputPackage` carry exactly the expected fields and
+none of the explicitly-excluded ones (2), `build_stage2_input()` passthrough
+(1), the written JSON has exactly the expected keys and none of the
+forbidden ones (1), `None` optional fields serialize to JSON `null` (1),
+multiple shots preserve order (1), Korean/Unicode content round-trips
+through explicit UTF-8 (1), an existing `stage2_input.json` is rejected
+and left byte-unchanged (1), and nothing else in `project_dir` (e.g.
+`clips/`) is touched (1). Full suite: 547/547 passing (394 Video Studio +
+9 CE-1 + 66 CE-2A + 32 CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c), zero
+regressions.
+
+One red/green demonstration was performed before landing, on the
+overwrite-rejection guarantee: removed the `path.exists()` check from
+`write_stage2_input()`. Exactly one test failed -
+`test_write_stage2_input_rejects_an_existing_file_without_modifying_it`
+("DID NOT RAISE FileExistsError") - with the other 6
+`test_ce_video_planning_stage2_input.py` cases and all other files
+unaffected. Reverted, full suite (547/547) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5 file, was
+touched during CE-4c. DB schema unchanged. CE-4d/CE-4e/CE-4f remain
 registered in the phase table as "Not started" - not implemented.
