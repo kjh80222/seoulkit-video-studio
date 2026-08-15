@@ -49,6 +49,18 @@ converts Human* + `stage2_input.json`/`stage3_input.json`/`clip_manifest.json`
 into EditPlan* before writing. See `edit_plan.py`'s module docstring for
 the full reasoning, including why `EditPlanSfxClip.file` is `""` for a
 discarded candidate.
+
+`BeatRow`/`ShotRow`/`Stage1BeatShotTable` (CE-4b): the structured shape a
+human's approved Stage 1 output (Beat/Shot tables, per the Stage 1
+manual's own machine-readable field mapping, sec. 17-1) is read from -
+`beat`/`shot`/`shot_type`/`visual_purpose`/`screen_number`/`screen_label`/
+`on_screen_text` map directly to the real repo example
+(`examples/sample-project/script/stage1_beat_shot_table.json`).
+`BeatRow.narration` is the one field beyond that example's strict
+mapping - added because CE-4c's already-frozen `PlannedShot.voice_text`
+needs a source, and the Stage 1 manual has no other candidate. See
+`stage1_input.py`'s module docstring for the full reasoning, including why
+`narration` is copied provisionally rather than split per shot.
 """
 
 from __future__ import annotations
@@ -277,3 +289,26 @@ class EditPlan:
     subtitles: list[EditPlanSubtitle]
     audio_layers: EditPlanAudioLayers
     warnings: list[EditPlanWarning] = field(default_factory=list)
+
+
+@dataclass
+class BeatRow:
+    beat: int
+    narration: str
+    visual_purpose: str
+    screen_number: str | None
+    screen_label: str | None
+
+
+@dataclass
+class ShotRow:
+    shot: str
+    beat: int
+    shot_type: str
+    on_screen_text: str | None
+
+
+@dataclass
+class Stage1BeatShotTable:
+    beats: list[BeatRow]
+    shots: list[ShotRow]
