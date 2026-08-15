@@ -23,7 +23,7 @@ exists at all.
 | CE-4a | `ContentPackage` model + Video Studio project-directory assembly | ✅ Done |
 | CE-4b | Topic/Research (content-strategy logic; undefined, may move later in the sequence) | Not started |
 | CE-4c | Stage 1 → Stage 2 Handoff Package (`stage2_input.json` - Stage 1 content data only, no Stage 2/3/4 creative or measured values) | ✅ Done |
-| CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json`, built from Stage 2's actual output once it exists - approved keyframe reference, Story Function, Continuity, and where `expected_filename()` is first computed/consumed) | Not started |
+| CE-4d | Stage 2 → Stage 3 Handoff Package (`stage3_input.json` - merges CE-4c's Stage 1 data with Stage 2's structured output by shot identity; `expected_clip_filename()` first computed/consumed here) | ✅ Done |
 | CE-4e | Stage 3 QC Assist (`clip_manifest.json` - measuring real Flow clips, Stage 3 QC's responsibility per the file's own header comment) | Not started |
 | CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Stage 5 remains a read-only consumer) | Not started |
 | CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
@@ -738,4 +738,99 @@ unaffected. Reverted, full suite (547/547) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5 file, was
 touched during CE-4c. DB schema unchanged. CE-4d/CE-4e/CE-4f remain
+registered in the phase table as "Not started" - not implemented.
+
+## Architecture Freeze Review (before CE-4d implementation)
+
+Four corrections were made to an earlier CE-4d draft before any code was
+written, all caught by re-checking the draft against the same two Stage
+2/3 manuals CE-4c's review used:
+
+1. **`visual_purpose` was missing from the draft `stage3_input.json`
+   despite the Stage 3 manual listing it as part of the required input**
+   ("Stage 1 테이블에서: Shot 번호, Beat, Visual Purpose ..."). Restored,
+   sourced from CE-4c's `stage2_input.json` unchanged.
+2. **A top-level `style_anchor_path` field was removed.** The Stage 3
+   manual's required-input list is exactly three items (Beat+Shot table,
+   approved keyframe image, Story Function + Continuity) and does not
+   separately reference a style anchor - by the time Stage 2 hands off an
+   approved keyframe, whatever style consistency the anchor established
+   is already baked into that image. A second top-level pointer to the
+   same thing would have been redundant, drift-prone data.
+3. **Story Function/Continuity are consumed as structured input
+   (`Stage2ShotOutput`), not typed ad hoc per call** - matching the real
+   shape already used by `examples/sample-project/references/stage2_shot_metadata.json`
+   (`shot`/`beat`/`story_function`/`continuity` per entry). Merging this
+   against CE-4c's `stage2_input.json` is done strictly by `shot` identity,
+   never by list position - a positional zip would silently attach one
+   shot's Story Function to a different shot's keyframe on any ordering
+   mismatch. Four failure classes are checked and reported together in
+   one `ShotIdentityMismatchError`: `missing`, `extra`, `duplicate`, and
+   `beat_mismatches`.
+4. **A `keyframes/` project-relative workspace convention was adopted**
+   for Stage 2's approved keyframe images (parallel to `clips/`, which is
+   reserved for Stage 3's video output). CE-4d only reads this location -
+   it never creates, copies, moves, or modifies the image files a human
+   places there. Checking that a referenced keyframe file actually exists
+   is not validation-duplication (Video Studio has no concept of a
+   keyframe at all, unlike the `preflight` overlap CE-5 deliberately
+   avoided) - so `write_stage3_input()` does check existence, but never
+   opens, decodes, or judges the image's content/resolution/quality.
+
+## CE-4d: Stage 2 → Stage 3 Handoff Package
+
+**Files**: new `src/content_engine/video_planning/stage3_input.py`; new
+`tests/test_ce_video_planning_stage3_input.py`; modified
+`src/content_engine/video_planning/models.py` (new `Stage2ShotOutput`/
+`Stage3PlannedShot`/`Stage3InputPackage`), `tests/test_ce_video_planning_models.py`
+(field-shape tests for the three new dataclasses). **No schema change, no
+new dependency, no DB change.**
+
+**`build_stage3_input(stage2_input, stage2_outputs)`**: merges CE-4c's
+`Stage2InputPackage` with a `list[Stage2ShotOutput]` by `shot` identity,
+preserving `stage2_input.shots`'s own order in the result. Raises
+`ShotIdentityMismatchError` (carrying `missing`/`extra`/`duplicate`/
+`beat_mismatches` all at once, never stopping at the first problem found)
+if the two inputs don't line up exactly. `expected_clip_filename(shot)`
+is computed here for the first time in the whole pipeline (`"1A"` ->
+`"clips/shot_1a_flow.mp4"`, the same rule CE-4c's design review already
+settled on but deferred).
+
+**`write_stage3_input(project_dir, package)`**: fixed validation order,
+so a later check can never partially undermine the overwrite guard's
+meaning - (1) reject if `stage3_input.json` already exists
+(`FileExistsError`), (2) reject any `approved_keyframe_path` that's
+absolute or escapes `project_dir` via `..` (`ValueError`), (3) collect
+every missing keyframe file and raise once with the complete list
+(`MissingKeyframeError`), (4) only then serialize with UTF-8 explicit
+(`encoding="utf-8"`).
+
+**Testing**: 17 new cases, all filesystem-only (no FFmpeg, no DB) - the
+three new dataclasses carry exactly their expected fields and none of the
+forbidden ones (3, in `test_ce_video_planning_models.py`), `expected_clip_filename()`
+(1), a correct merge preserving order (1), each of the four identity-
+mismatch classes raising independently (4), the written JSON has exactly
+the expected keys (1), absolute-path and `..`-traversal rejection (2),
+every missing keyframe reported together (1), a successful write when
+keyframes exist (1), an existing `stage3_input.json` rejected and left
+byte-unchanged (1), Korean/UTF-8 round-trip (1), and the keyframe file's
+own bytes left untouched (1). Full suite: 564/564 passing (394 Video
+Studio + 9 CE-1 + 66 CE-2A + 32 CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c + 17
+CE-4d), zero regressions.
+
+One red/green demonstration was performed before landing, on the
+duplicate-shot safeguard specifically - the review's stated top concern
+for this phase, since a silent duplicate is a data-corruption risk (one
+shot's Story Function attaching to another), not merely a missing-file
+inconvenience like a simple overwrite. Removed the `duplicate.append()`
+call from the loop building `output_by_shot`, letting a later entry for
+the same `shot` silently replace an earlier one in the dict. Exactly one
+test failed - `test_build_stage3_input_raises_on_duplicate_shot` ("DID
+NOT RAISE ShotIdentityMismatchError") - with the other 13
+`test_ce_video_planning_stage3_input.py` cases (including the missing/
+extra/beat-mismatch identity checks) and all other files unaffected.
+Reverted, full suite (564/564) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c file,
+was touched during CE-4d. DB schema unchanged. CE-4e/CE-4f remain
 registered in the phase table as "Not started" - not implemented.
