@@ -27,7 +27,7 @@ exists at all.
 | CE-4e | Stage 3 QC Assist (`clip_manifest.json` - Human-Assisted QC, not automatic video QC; `sfx_contract_version=1` adopted) | ✅ Done |
 | CE-4f | Stage 4 Voice / Alignment / Semantic Sync (`edit_plan.json` - the actual, sole producer per the Stage 4/5 contract; Human-Authored Voice/Semantic-Sync/SFX input, no TTS/alignment execution) | ✅ Done |
 | CE-5 | Human Asset Intake / Google Flow Handoff (Google Flow human clip readiness - a thin re-interpretation of CE-3's `run_preflight()`, not a new asset-validation layer) | ✅ Done |
-| CE-6 | Video Studio invocation wiring (preflight → preview → render via CE-3) | Not started |
+| CE-6 | Video Studio invocation wiring (`preflight_project()`/`render_project()` - a thin, unmodified pass-through to CE-3's adapter; no gate/readiness logic of its own) | ✅ Done |
 
 **Phase number ≠ runtime execution order.** CE-5 was implemented before CE-4e/CE-4f, but functionally requires `edit_plan.json` to exist (it checks `edit_plan.json` loads and has no `MISSING_CLIP`) - a file only CE-4f can produce. The real per-project data-flow order, confirmed against `execution/clip_manifest.py`'s "Stage 3 writes → Stage 4 consumes → Stage 5 reads-and-verifies" contract (ch. 24) and `preflight`'s own file-existence checks, is:
 
@@ -1291,3 +1291,93 @@ cases were unaffected. Reverted, full suite (684/684) green again.
 
 No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
 CE-4e/CE-4f file, was touched during CE-4b. DB schema unchanged.
+
+## Architecture Freeze Review (before CE-6 implementation)
+
+A dedicated investigation confirmed CE-6's real scope is much thinner than
+the phase table's original one-line description ("preflight → preview →
+render via CE-3") suggested, grounded directly in `cli/main.py`,
+`render/report.py`, and CE-3's own `adapter.py`:
+
+- **`run_preview()`/`run_render()` (CE-3) already gate themselves.**
+  `render/report.py`'s `_run_and_report()` calls `evaluate_plan()`
+  internally and refuses via `RenderResult.gate_error` when the plan isn't
+  ready - confirmed by its own docstring ("Gate rejections do not
+  populate `errors[]`... it's already fully represented by
+  `effective_status`/`preflight_issues[]`/`gate_error`"). CE-6 therefore
+  never calls `run_preflight()` before `run_preview()`/`run_render()` -
+  doing so would be a second, redundant evaluation of the same plan, not
+  an extra safety net. `preflight_project()` exists purely as an
+  independent diagnostic a caller can use *instead of* attempting a
+  render, not as a required precondition CE-6 enforces.
+- **CE-5's `check_asset_readiness()` is a narrower, human-facing signal
+  ("are the Flow clips here"), not a render precondition.** It
+  deliberately ignores Voice/BGM/SFX/`CLIP_MANIFEST_MISSING` issues (its
+  own Freeze Review), while `evaluate_plan()` inside `run_preview()`/
+  `run_render()` already checks all of them. CE-6 never calls CE-5 - a
+  caller who wants that specific signal calls CE-5 directly.
+- **`AdapterResult` (CE-3) is returned completely unmodified.** CE-6
+  defines no dataclass of its own and never reformats `category`/
+  `payload`/`stdout`/`stderr`, and never promotes `USAGE_ERROR`/
+  `ADAPTER_INVOCATION_ERROR` into a raised exception - unlike CE-5's
+  `RuntimeError`-on-adapter-failure precedent, which was needed there
+  specifically because CE-5 returns a narrower domain result
+  (`AssetReadinessResult`) that has no field to carry an adapter category.
+  CE-6 *is* the execution boundary itself, so preserving the original
+  result is more useful than re-narrating it.
+- **`preview` vs `final` is never inferred.** No "REVIEW_REQUIRED means
+  auto-fall-back-to-preview" policy exists in this module - the caller
+  states `mode` explicitly; `render_project()` raises a plain `ValueError`
+  for anything else, before any subprocess starts.
+- **A real, frozen Video Studio quirk was found and worked around only in
+  the test fixtures, never in `pipeline.py` itself**: `render/report.py`'s
+  `_run_and_report()` unconditionally reads `edit_plan_path.read_bytes()`
+  for its input hash even on the gate-rejected path - a project directory
+  with *no* `edit_plan.json` file at all makes that read raise a raw
+  `FileNotFoundError`, which the CLI's top-level catch-all turns into
+  `USAGE_ERROR` rather than a clean `GATE_REJECTED` (confirmed empirically
+  via a direct CLI invocation, not assumed). This is accepted, existing
+  Video Studio behavior - CE-6 tests use a minimal schema-valid
+  `edit_plan.json` (referencing a clip file that doesn't exist, producing
+  a clean `MISSING_CLIP` -> `NOT_READY` -> `GATE_REJECTED`) to exercise
+  the gate-rejection path CE-6 is actually meant to demonstrate
+  pass-through for.
+
+## CE-6: Video Studio Invocation Wiring
+
+**Files**: new `src/content_engine/video_studio/pipeline.py`; new
+`tests/test_ce_video_studio_pipeline.py`. **No schema change, no new
+dependency, no DB change, no new dataclass.**
+
+**`preflight_project(project_dir)`**: `return run_preflight(project_dir)`,
+nothing else. **`render_project(project_dir, mode)`**: raises `ValueError`
+for any `mode` other than `"preview"`/`"final"` before touching a
+subprocess; otherwise dispatches to `run_preview()`/`run_render()` (CE-3)
+and returns that `AdapterResult` unmodified. Full reasoning (why no
+preflight pre-call, no CE-5 call, no wrapper dataclass, no auto mode
+selection) is in the module docstring and the Freeze Review above.
+
+**Testing**: 8 new cases, all real subprocess calls (matching CE-3's own
+testing philosophy, no mocking of the adapter boundary) - `command` routed
+correctly for `preflight`/`preview`/`final` (3), invalid `mode` raising
+`ValueError` before any subprocess call, confirmed via a monkeypatch guard
+that fails the test if `run_preview`/`run_render` were reached (2), exact
+pass-through equality against calling CE-3's own functions directly for
+both `preflight_project()` and `render_project()` (2), and a real
+`MISSING_CLIP`-driven `GATE_REJECTED` result's `category`/`payload`
+preserved unmodified (1). Full suite: 692/692 passing (394 Video Studio +
+9 CE-1 + 66 CE-2A + 32 CE-3 + 26 CE-4a + 11 CE-5 + 9 CE-4c + 17 CE-4d + 28
+CE-4e + 62 CE-4f + 30 CE-4b + 8 CE-6), zero regressions.
+
+One red/green demonstration was performed before landing, on CE-6's core
+architectural promise - unmodified pass-through. Changed
+`preflight_project()` to reconstruct the `AdapterResult` it received with
+`stdout=""` instead of returning it directly. Exactly one test failed -
+`test_preflight_project_is_unmodified_pass_through` (an `stdout` field
+mismatch) - with the other 7 cases, including `render_project()`'s own
+separate pass-through test (untouched by this change) and the
+gate-rejection preservation test, unaffected. Reverted, full suite
+(692/692) green again.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-5/CE-4c/CE-4d/
+CE-4e/CE-4f/CE-4b file, was touched during CE-6. DB schema unchanged.
