@@ -188,6 +188,7 @@ from content_engine.video_planning.models import (
 )
 
 DEFAULT_MAX_SETTLE_FRAME_HOLD_MS = 1500
+DEFAULT_SUBTITLE_MAX_CHARS = 40
 
 
 class VoiceInputInconsistentError(Exception):
@@ -475,6 +476,7 @@ def build_edit_plan(
     sfx_decisions: list[HumanSfxDecision],
     project_dir: Path,
     max_settle_frame_hold_ms: int = DEFAULT_MAX_SETTLE_FRAME_HOLD_MS,
+    subtitle_max_chars_by_beat: dict[int, int] | None = None,
 ) -> EditPlan:
     if voice_input.timing_grade == "ESTIMATED":
         if voice_input.audio_file is not None:
@@ -633,7 +635,10 @@ def build_edit_plan(
         beat_start_ms = min(sync_by_shot[shot].start_ms for shot in shots_in_beat)
         beat_end_ms = max(sync_by_shot[shot].end_ms for shot in shots_in_beat)
 
-        for lines, cue_start_ms, cue_end_ms in build_subtitle_cues(beat_voice_text, beat_start_ms, beat_end_ms):
+        max_chars = (subtitle_max_chars_by_beat or {}).get(beat, DEFAULT_SUBTITLE_MAX_CHARS)
+        for lines, cue_start_ms, cue_end_ms in build_subtitle_cues(
+            beat_voice_text, beat_start_ms, beat_end_ms, max_chars=max_chars,
+        ):
             subtitles.append(EditPlanSubtitle(
                 beat=beat, start_ms=cue_start_ms, end_ms=cue_end_ms,
                 lines=lines, position_preset="bottom-center", timing_grade=voice_input.timing_grade,
