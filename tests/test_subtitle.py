@@ -40,26 +40,30 @@ def test_generate_ass_header_uses_given_play_res():
     assert "PlayResY: 1920" in ass
 
 
-def test_generate_ass_style_uses_ch18_values():
+def test_generate_ass_style_uses_mobile_readability_values():
+    # Font size 56 (raised from the ch.18 spec value of 44) - real-project
+    # mobile-Shorts QC found 44 too small on a 720x1280 render.
     ass = generate_ass([], play_res_x=640, play_res_y=360)
 
     style_line = next(line for line in ass.splitlines() if line.startswith("Style:"))
     fields = style_line.split(",")
     assert fields[1] == "Noto Sans KR"
-    assert fields[2] == "44"
+    assert fields[2] == "56"
     outline, shadow = fields[16], fields[17]
     assert outline == "3"
     assert shadow == "1"
 
 
-def test_generate_ass_maps_bottom_center_to_an2_and_margin_120():
+def test_generate_ass_maps_bottom_center_to_an2_and_margin_160():
+    # margin_v 160 (raised from the ch.18 spec value of 120) - same
+    # mobile-Shorts safe-area QC finding as the font size change above.
     ass = generate_ass([one_subtitle(position_preset="bottom-center")], 640, 360)
 
     dialogue = next(line for line in ass.splitlines() if line.startswith("Dialogue:"))
     fields = dialogue.split(",", 9)
     margin_v = fields[7]
     text = fields[9]
-    assert margin_v == "120"
+    assert margin_v == "160"
     assert text.startswith(r"{\an2}")
 
 

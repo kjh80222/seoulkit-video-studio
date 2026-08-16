@@ -13,9 +13,11 @@ from content_engine.video_planning.edit_plan import (
     SfxIdentityMismatchError,
     VoiceInputInconsistentError,
     build_edit_plan,
+    build_subtitle_cues,
     build_subtitle_lines,
     compute_clip_fit,
     measure_voice_duration,
+    split_into_clauses,
     write_edit_plan,
 )
 from content_engine.video_planning.models import (
@@ -366,13 +368,157 @@ def test_build_subtitle_lines_wraps_within_two_lines():
 
 
 def test_build_subtitle_lines_flags_overflow_and_still_returns_two_lines():
+    # Legacy helper - still truncates on its own. Only build_subtitle_cues()
+    # (used by build_edit_plan()) is required to never lose text.
     long_text = " ".join(["word"] * 40)
     lines, overflowed = build_subtitle_lines(long_text)
     assert overflowed is True
     assert len(lines) == 2
 
 
-def test_records_warning_on_subtitle_overflow(tmp_path):
+# --- split_into_clauses() -----------------------------------------------------
+
+
+def test_split_into_clauses_splits_on_sentence_and_clause_punctuation():
+    text = "By 1953, Seoul had changed hands four times, and large parts of the capital lay in ruins."
+    clauses = split_into_clauses(text)
+    assert clauses == [
+        "By 1953,",
+        "Seoul had changed hands four times,",
+        "and large parts of the capital lay in ruins.",
+    ]
+
+
+def test_split_into_clauses_splits_on_em_dash():
+    text = "The city didn't just recover — it reinvented itself completely."
+    clauses = split_into_clauses(text)
+    assert clauses == ["The city didn't just recover —", "it reinvented itself completely."]
+
+
+def test_split_into_clauses_no_punctuation_returns_single_clause():
+    text = " ".join(["word"] * 40)
+    assert split_into_clauses(text) == [text]
+
+
+def test_split_into_clauses_preserves_every_word():
+    text = "With the fighting over, displaced families slowly returned to a city with almost no working infrastructure."
+    clauses = split_into_clauses(text)
+    assert " ".join(clauses).split() == text.split()
+
+
+def test_split_into_clauses_empty_text_returns_empty_list():
+    assert split_into_clauses("") == []
+    assert split_into_clauses("   ") == []
+
+
+# --- build_subtitle_cues() ----------------------------------------------------
+
+
+def test_build_subtitle_cues_single_clause_short_text_single_cue():
+    # No clause punctuation inside -> one clause -> one cue spanning the window.
+    cues = build_subtitle_cues("Seoul lay in ruins", 0, 3000)
+    assert len(cues) == 1
+    lines, start_ms, end_ms = cues[0]
+    assert len(lines) <= 2
+    assert start_ms == 0 and end_ms == 3000
+
+
+def test_build_subtitle_cues_multiple_clauses_become_separate_sequential_cues():
+    # Two comma-separated clauses -> two cues, each its own on-screen block,
+    # sequential and covering the full window.
+    cues = build_subtitle_cues("By 1953, Seoul lay in ruins.", 0, 3000)
+    assert len(cues) == 2
+    assert cues[0][1] == 0
+    assert cues[-1][2] == 3000
+
+
+def test_build_subtitle_cues_never_drops_or_reorders_words():
+    text = (
+        "With the fighting over, displaced families slowly returned to a city with almost no "
+        "working infrastructure. The government launched a massive rebuilding campaign, clearing "
+        "rubble and reconstructing the city block by block."
+    )
+    cues = build_subtitle_cues(text, 0, 11705)
+    reconstructed = " ".join(word for lines, _, _ in cues for line in lines for word in line.split())
+    assert reconstructed.split() == text.split()
+
+
+def test_build_subtitle_cues_produces_multiple_cues_for_a_long_beat():
+    long_beat_text = (
+        "Today, Seoul is one of the world's largest, densest capitals, its skyline carrying "
+        "almost no memory of the rubble it once was. The city didn't just recover — it "
+        "reinvented itself completely."
+    )
+    cues = build_subtitle_cues(long_beat_text, 0, 11857)
+    assert len(cues) > 1
+
+
+def test_build_subtitle_cues_all_cues_max_two_lines():
+    text = " ".join(["averyveryverylongword"] * 15) + "."
+    cues = build_subtitle_cues(text, 0, 20000)
+    assert len(cues) > 1
+    for lines, _, _ in cues:
+        assert len(lines) <= 2
+
+
+def test_build_subtitle_cues_pathological_no_punctuation_preserves_all_words():
+    long_text = " ".join(["word"] * 40)
+    cues = build_subtitle_cues(long_text, 0, 20000)
+    assert len(cues) > 1
+    reconstructed = " ".join(word for lines, _, _ in cues for line in lines for word in line.split())
+    assert reconstructed.split() == long_text.split()
+
+
+def test_build_subtitle_cues_are_sequential_non_overlapping_within_window():
+    text = (
+        "Three years of fighting had torn through the same streets again and again, until an "
+        "armistice finally silenced the guns in July 1953."
+    )
+    start_ms, end_ms = 5835, 13894
+    cues = build_subtitle_cues(text, start_ms, end_ms)
+    assert cues[0][1] == start_ms
+    assert cues[-1][2] == end_ms
+    for (_, s, e) in cues:
+        assert s < e
+    for (_, _, prev_end), (_, next_start, _) in zip(cues, cues[1:]):
+        assert prev_end == next_start
+
+
+def test_build_subtitle_cues_raises_on_invalid_window():
+    with pytest.raises(ValueError):
+        build_subtitle_cues("some text", 5000, 4000)
+
+
+def test_build_subtitle_cues_empty_text_returns_no_cues():
+    assert build_subtitle_cues("", 0, 1000) == []
+
+
+# --- build_edit_plan() subtitle integration ------------------------------------
+
+
+def test_subtitles_generated_per_beat_not_per_shot_no_duplication(tmp_path):
+    beat_text = "By 1953, Seoul had changed hands four times, and large parts of the capital lay in ruins."
+    stage2_input = _stage2_input([_planned_shot(shot="1A"), _planned_shot(shot="1B")])
+    stage3_input = _stage3_input([
+        _stage3_shot(shot="1A", voice_text=beat_text),
+        _stage3_shot(shot="1B", voice_text=beat_text),
+    ])
+    clip_manifest = _clip_manifest([_manifest_entry(shot="1A"), _manifest_entry(shot="1B")])
+    sync = [
+        _sync(shot="1A", start_ms=0, end_ms=3000, clip_in_ms=0, clip_out_ms=3000),
+        _sync(shot="1B", start_ms=3000, end_ms=5800, clip_in_ms=0, clip_out_ms=2800),
+    ]
+    plan = build_edit_plan(
+        "p", stage2_input, stage3_input, clip_manifest, _voice_input(), sync, [], [], tmp_path,
+    )
+    reconstructed = " ".join(word for sub in plan.subtitles for line in sub.lines for word in line.split())
+    # The Beat's narration appears exactly once across all cues, not once per shot.
+    assert reconstructed.split() == beat_text.split()
+    assert plan.subtitles[0].start_ms == 0
+    assert plan.subtitles[-1].end_ms == 5800
+
+
+def test_no_subtitle_overflow_warning_for_normal_or_pathological_narration(tmp_path):
     long_text = " ".join(["word"] * 40)
     stage2_input = _stage2_input([_planned_shot()])
     stage3_input = _stage3_input([_stage3_shot(voice_text=long_text)])
@@ -380,7 +526,26 @@ def test_records_warning_on_subtitle_overflow(tmp_path):
     plan = build_edit_plan(
         "p", stage2_input, stage3_input, clip_manifest, _voice_input(), [_sync()], [], [], tmp_path,
     )
-    assert any(w.code == "SUBTITLE_TEXT_OVERFLOW" for w in plan.warnings)
+    assert not any(w.code == "SUBTITLE_TEXT_OVERFLOW" for w in plan.warnings)
+    reconstructed = " ".join(word for sub in plan.subtitles for line in sub.lines for word in line.split())
+    assert reconstructed.split() == long_text.split()
+
+
+def test_subtitle_cues_all_within_two_lines_via_build_edit_plan(tmp_path):
+    long_text = (
+        "Today, Seoul is one of the world's largest, densest capitals, its skyline carrying "
+        "almost no memory of the rubble it once was. The city didn't just recover — it "
+        "reinvented itself completely."
+    )
+    stage2_input = _stage2_input([_planned_shot()])
+    stage3_input = _stage3_input([_stage3_shot(voice_text=long_text)])
+    clip_manifest = _clip_manifest([_manifest_entry()])
+    plan = build_edit_plan(
+        "p", stage2_input, stage3_input, clip_manifest, _voice_input(), [_sync()], [], [], tmp_path,
+    )
+    assert len(plan.subtitles) > 1
+    for sub in plan.subtitles:
+        assert len(sub.lines) <= 2
 
 
 # --- overlays ---------------------------------------------------------------

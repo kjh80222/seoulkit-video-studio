@@ -1543,3 +1543,90 @@ explicitly-disclosed additive changes above (all direct consequences of
 adding `content_package_id`/`payload` to `Job`). `db/schema.sql` itself is
 byte-identical to its CE-1 version; the new columns are applied entirely
 by `db/migrations.py`.
+
+## CE-4f follow-up: Subtitle multi-cue + optional Forced Alignment
+
+Discovered running the first real (non-fixture) project end to end: CE-4f
+v1's subtitle generation (one `build_subtitle_lines()` call per shot,
+truncated to 2 lines) silently dropped narration text on every shot whose
+Beat exceeded ~80 characters - all 10 shots of the real "1953년 서울"
+project overflowed. The root cause was architectural, not a threshold
+tuning problem: `voice_text` is a whole Beat's narration duplicated
+identically across that Beat's A/B shots (CE-4c/CE-4d's own design), so
+the old per-shot call showed the same truncated ~80 characters twice
+instead of once, and lost everything past that regardless of `max_chars`.
+
+**Fix**: subtitles are now generated per-Beat, not per-shot.
+`split_into_clauses()` (new, pure) splits a Beat's narration at clause
+punctuation (`. ! ? , —`); `build_subtitle_cues()` (new, pure) wraps each
+clause into <=2-line groups (reusing `build_subtitle_lines()` internally
+as the line-wrapper), further splitting a too-long clause at word
+boundaries into additional cues rather than truncating, and allocates
+each cue a proportional slice of the Beat's combined shot time window.
+`build_edit_plan()`'s subtitle loop now groups `expected_shots` by beat
+and calls `build_subtitle_cues()` once per Beat. Structurally, this
+design cannot lose a word: `SUBTITLE_TEXT_OVERFLOW` is unreachable from
+the production path (only the legacy `build_subtitle_lines()` unit tests
+still exercise the old truncating behavior directly). No
+`EditPlanSubtitle`/schema field changed - `subtitles[]` was already an
+unbounded array of independently-timed entries, and
+`seoulkit_studio/render/subtitle.py`'s `generate_ass()`/`generate_srt()`
+already iterate it generically with no per-shot assumption, confirmed by
+reading both before making this change - so this fix touches zero
+`seoulkit_studio` files.
+
+**New module `video_planning/voice_alignment.py`** (CE-4f's own EXACT-grade
+verification path, not wired into any automatic job/CLI flow): pure text
+functions `normalize_tokens()` (lowercase, punctuation-stripped, curly
+quotes folded, apostrophes preserved, and a narrowly-scoped spoken-year
+folder - "nineteen fifty-three" -> "1953" - not a general cardinal-number
+parser), `align_tokens()` (difflib-based matched/substituted/missing/extra
+counts against the approved narration), and `decide_timing_grade()`. The
+`EXACT_MAX_WORD_ERROR_RATE = 0.05` cutoff is documented as a **system
+policy value** (the conventional "near-perfect ASR" bar), not a physical
+constant - it is the one place this project decides "close enough to
+trust an ASR transcript's word timestamps as a forced-alignment stand-in
+for EXACT", and it is pinned by four boundary-value unit tests
+(perfect match, exactly-at-threshold, just-over-threshold, poor match)
+so changing it is a deliberate, reviewed, test-visible act. This module
+is advisory only: nothing in `edit_plan.py`/`jobs/dispatch.py`/the CLI
+calls `decide_timing_grade()` or otherwise auto-populates
+`HumanVoiceTimingInput.timing_grade` from it. A human still supplies
+`timing_grade` directly in the `edit_plan_build` payload; `EXACT` is never
+set automatically by this module or by any code that calls it, and it has
+not yet been exercised against real audio end-to-end (the only sandboxed
+environment this was developed in blocks the model-weight download this
+function needs - `huggingface.co` and OpenAI's model CDN both return a
+policy-level 403 from the outbound proxy - so `decide_timing_grade()`'s
+threshold has only been verified with synthetic `AlignmentStats`, not a
+real recognized transcript, as of this entry).
+
+`transcribe_with_word_timestamps()` (the only function in this module
+that touches `faster-whisper`/disk) imports `faster_whisper` lazily
+inside the function body specifically so importing
+`content_engine.video_planning` - or running any of Content Engine's
+existing functionality - never depends on the optional `alignment` extra
+being installed; calling it without the extra raises a plain,
+actionable `ImportError` rather than failing at import time. `faster-whisper`
+was added as `[project.optional-dependencies].alignment`, not to
+`[project].dependencies` - core `content_engine`/`seoulkit-studio`
+install stays exactly `jsonschema` + `fonttools`.
+
+**Testing**: 42 new cases (17 in `test_ce_video_planning_edit_plan.py`:
+clause splitting, cue generation, narration-coverage/no-duplication/
+no-overflow integration checks; 25 in the new
+`test_ce_video_planning_voice_alignment.py`, all pure-function - no audio
+file or faster-whisper install required). One prior test,
+`test_records_warning_on_subtitle_overflow`, asserted the exact lossy
+behavior this fix removes and was deleted, replaced by
+`test_no_subtitle_overflow_warning_for_normal_or_pathological_narration`
+asserting the opposite (and asserting full-narration coverage even for
+its pathological no-punctuation input). Full suite: 830/830 passing (789
+prior + 16 net-new subtitle cases + 25 new alignment cases), zero other
+regressions.
+
+No `seoulkit_studio` file, and no CE-1/CE-2A/CE-3/CE-4a/CE-4b/CE-4c/CE-4d/
+CE-4e/CE-5/CE-6/CE-2B/CE-11 file, was touched by this follow-up beyond
+`edit_plan.py`'s subtitle-generation section, the new `voice_alignment.py`
+module, and `pyproject.toml`'s `optional-dependencies`. `db/schema.sql`
+and `db/migrations.py` are unchanged.

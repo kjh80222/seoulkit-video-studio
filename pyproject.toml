@@ -16,6 +16,9 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+alignment = [
+    "faster-whisper>=1.0",
+]
 
 [project.scripts]
 seoulkit-studio = "seoulkit_studio.cli.main:main"

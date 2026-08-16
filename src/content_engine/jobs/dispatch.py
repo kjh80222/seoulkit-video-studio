@@ -119,12 +119,17 @@ def _handle_edit_plan_build(conn: sqlite3.Connection, job: Job) -> None:
         stage2_input = read_stage2_input(project_dir)
         stage3_input = read_stage3_input(project_dir)
         clip_manifest = read_clip_manifest(project_dir)
+        raw_payload = _payload_dict(job)
         voice_input, semantic_sync, overlay_decisions, sfx_decisions = edit_plan_human_input_from_payload(
-            _payload_dict(job)
+            raw_payload
         )
+        subtitle_max_chars_by_beat = raw_payload.get("subtitle_max_chars_by_beat")
+        if subtitle_max_chars_by_beat is not None:
+            subtitle_max_chars_by_beat = {int(k): v for k, v in subtitle_max_chars_by_beat.items()}
         plan = build_edit_plan(
             topic, stage2_input, stage3_input, clip_manifest,
             voice_input, semantic_sync, overlay_decisions, sfx_decisions, project_dir,
+            subtitle_max_chars_by_beat=subtitle_max_chars_by_beat,
         )
         write_edit_plan(project_dir, plan)
     except Exception as exc:

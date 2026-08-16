@@ -71,18 +71,24 @@ from seoulkit_studio.render.filter_escape import escape_filter_path
 from seoulkit_studio.render.fonts import BundledFontError, FONT_DIR, resolve_bundled_font
 from seoulkit_studio.render.time_format import ms_to_ass_timestamp, ms_to_ffmpeg_timestamp
 
-# ch. 18 `subtitle.position_presets`.
+# ch. 18 `subtitle.position_presets`. bottom-center's margin_v was raised
+# from the ch.18 spec value of 120 to 160 (real-project mobile-Shorts QC
+# on a 720x1280 render: 120px sat too close to the bottom edge/platform UI
+# safe area) - top-center is unchanged, still the ch.18 spec value.
 SUBTITLE_POSITION_PRESETS: dict[str, dict[str, int]] = {
-    "bottom-center": {"an": 2, "margin_v": 120},
+    "bottom-center": {"an": 2, "margin_v": 160},
     "top-center": {"an": 8, "margin_v": 100},
 }
 
 # ch. 18 `subtitle` config. Colors are not specified there - white text with
 # a black outline is this module's own reasonable default, not a spec value
-# (see docs/phase-plan.md Known gaps).
+# (see docs/phase-plan.md Known gaps). Font size raised from the ch.18 spec
+# value of 44 to 56 for the same mobile-Shorts readability reason as
+# margin_v above; outline/shadow left at spec values pending a v002 visual
+# check.
 _STYLE_NAME = "Default"
 _FONT_NAME = "Noto Sans KR"
-_FONT_SIZE = 44
+_FONT_SIZE = 56
 _OUTLINE = 3
 _SHADOW = 1
 
