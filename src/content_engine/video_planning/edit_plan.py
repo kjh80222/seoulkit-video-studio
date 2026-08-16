@@ -162,6 +162,7 @@ something this module automates.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -336,6 +337,13 @@ def compute_clip_fit(
 
 
 def build_subtitle_lines(voice_text: str, max_chars: int = 40, max_lines: int = 2) -> tuple[list[str], bool]:
+    """Legacy single-block wrapper - truncates anything past max_lines.
+
+    Kept only as a low-level line-wrapping helper (reused inside
+    _wrap_into_line_groups() below) and for its own unit tests. The
+    production path in build_edit_plan() never calls this directly on a
+    whole Beat's narration any more - see build_subtitle_cues().
+    """
     words = voice_text.split()
     all_lines: list[str] = []
     current = ""
@@ -352,6 +360,108 @@ def build_subtitle_lines(voice_text: str, max_chars: int = 40, max_lines: int = 
 
     overflowed = len(all_lines) > max_lines
     return all_lines[:max_lines], overflowed
+
+
+# Clause boundary = one of . ! ? , — followed by whitespace. The punctuation
+# mark stays attached to the clause that precedes it (lookbehind), matching
+# the Stage 4 manual's "호흡/절 단위로 줄바꿈" subtitle segmentation rule.
+_CLAUSE_BOUNDARY_RE = re.compile(r"(?<=[.!?,—])\s+")
+
+
+def split_into_clauses(voice_text: str) -> list[str]:
+    """Split narration into clause/phrase chunks at sentence/clause
+    punctuation (. ! ? , —). Every word of voice_text is preserved across
+    the returned clauses - this only decides where cue boundaries are
+    preferred, it never drops or rewrites text.
+    """
+    text = voice_text.strip()
+    if not text:
+        return []
+    clauses = [c for c in _CLAUSE_BOUNDARY_RE.split(text) if c]
+    return clauses if clauses else [text]
+
+
+def _wrap_into_line_groups(text: str, max_chars: int = 40, max_lines: int = 2) -> list[list[str]]:
+    """Wrap text into one or more groups of <= max_lines lines each, at word
+    boundaries, never dropping a word. A clause that fits in max_lines
+    produces exactly one group; a clause too long for max_lines produces
+    multiple groups (i.e. spills into additional sequential cues instead of
+    being truncated). A single word longer than max_chars is still emitted
+    whole on its own line - words are never split mid-token.
+    """
+    words = text.split()
+    if not words:
+        return []
+
+    groups: list[list[str]] = []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        current = word
+        if len(lines) == max_lines:
+            groups.append(lines)
+            lines = []
+    if current:
+        lines.append(current)
+    if lines:
+        groups.append(lines)
+    return groups
+
+
+def build_subtitle_cues(
+    voice_text: str, start_ms: int, end_ms: int, max_chars: int = 40, max_lines: int = 2,
+) -> list[tuple[list[str], int, int]]:
+    """Split voice_text into one or more sequential subtitle cues covering
+    the full [start_ms, end_ms] window, with every cue holding <= max_lines
+    lines and no word ever dropped or rewritten.
+
+    Cue boundaries prefer clause punctuation (split_into_clauses()); a
+    clause too long for max_lines is further split at word boundaries into
+    additional cues rather than truncated - so unlike build_subtitle_lines(),
+    this function structurally cannot lose narration text, regardless of
+    input length. There is no "overflow" outcome here: a long Beat simply
+    produces more cues.
+
+    Timing is allocated proportionally to each cue's character count within
+    the window - the closest approximation available without frame-accurate
+    word timestamps. When forced-alignment word timestamps are available
+    (voice_alignment.py, EXACT grade), callers should prefer deriving cue
+    timing from those real timestamps instead of this proportional split.
+
+    Returns an empty list for empty input (no shot/beat produces a cue for
+    silence).
+    """
+    if start_ms >= end_ms:
+        raise ValueError(f"start_ms ({start_ms}) must be < end_ms ({end_ms})")
+
+    groups: list[list[str]] = []
+    for clause in split_into_clauses(voice_text):
+        groups.extend(_wrap_into_line_groups(clause, max_chars, max_lines))
+    if not groups:
+        return []
+
+    total_chars = sum(len(" ".join(g)) for g in groups)
+    window_ms = end_ms - start_ms
+
+    cues: list[tuple[list[str], int, int]] = []
+    cursor_ms = start_ms
+    for i, group in enumerate(groups):
+        if i == len(groups) - 1:
+            cue_end_ms = end_ms
+        else:
+            group_chars = len(" ".join(group))
+            span_ms = round(window_ms * group_chars / total_chars) if total_chars else 0
+            cue_end_ms = min(max(cursor_ms + span_ms, cursor_ms + 1), end_ms)
+        cues.append((group, cursor_ms, cue_end_ms))
+        cursor_ms = cue_end_ms
+
+    return cues
 
 
 def build_edit_plan(
@@ -497,22 +607,37 @@ def build_edit_plan(
                 source="stage1_beat_table",
             ))
 
+    # Subtitles are generated per BEAT, not per shot: a Beat's full narration
+    # is one continuous piece of speech shared by all of that Beat's shots
+    # (stage3_shots[shot].voice_text is already identical across a Beat's
+    # A/B shots by CE-4c/CE-4d construction) - captioning it once per Beat,
+    # as a sequence of cues spanning that Beat's combined shot windows,
+    # avoids showing the same (truncated) block twice under two different
+    # shots. See build_subtitle_cues() for why this also eliminates
+    # SUBTITLE_TEXT_OVERFLOW in the production path: a long Beat produces
+    # more cues instead of losing text.
     subtitles: list[EditPlanSubtitle] = []
     warnings: list[EditPlanWarning] = []
+    shots_by_beat: dict[int, list[str]] = {}
+    beats_seen: list[int] = []
     for shot in expected_shots:
-        s3 = stage3_shots[shot]
-        sync = sync_by_shot[shot]
-        lines, overflowed = build_subtitle_lines(s3.voice_text)
-        if overflowed:
-            warnings.append(EditPlanWarning(
-                code="SUBTITLE_TEXT_OVERFLOW",
-                message=f"voice_text for shot {shot!r} does not fit in 2 lines",
-                severity="warning", segment_ref=f"shot={shot}",
+        beat = stage3_shots[shot].beat
+        if beat not in shots_by_beat:
+            shots_by_beat[beat] = []
+            beats_seen.append(beat)
+        shots_by_beat[beat].append(shot)
+
+    for beat in beats_seen:
+        shots_in_beat = shots_by_beat[beat]
+        beat_voice_text = stage3_shots[shots_in_beat[0]].voice_text
+        beat_start_ms = min(sync_by_shot[shot].start_ms for shot in shots_in_beat)
+        beat_end_ms = max(sync_by_shot[shot].end_ms for shot in shots_in_beat)
+
+        for lines, cue_start_ms, cue_end_ms in build_subtitle_cues(beat_voice_text, beat_start_ms, beat_end_ms):
+            subtitles.append(EditPlanSubtitle(
+                beat=beat, start_ms=cue_start_ms, end_ms=cue_end_ms,
+                lines=lines, position_preset="bottom-center", timing_grade=voice_input.timing_grade,
             ))
-        subtitles.append(EditPlanSubtitle(
-            beat=s3.beat, start_ms=sync.start_ms, end_ms=sync.end_ms,
-            lines=lines, position_preset="bottom-center", timing_grade=voice_input.timing_grade,
-        ))
 
     sfx_clips: list[EditPlanSfxClip] = []
     for shot in expected_shots:
